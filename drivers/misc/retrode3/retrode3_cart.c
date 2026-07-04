@@ -1038,6 +1038,7 @@ static struct retrode3_driver retrode3_slot_driver = {
 	.driver = {
 		.name	= "retrode3-controller",
 		.of_match_table = retrode3_slot_of_match,
+		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 	},
 	.id_table	= retrode3_slot_idtable,
 	.probe		= retrode3_probe_slot,

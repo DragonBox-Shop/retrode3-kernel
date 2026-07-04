@@ -17,6 +17,8 @@
 #ifdef CONFIG_IA64
 # include <linux/efi.h>
 #endif
+#include <linux/clk.h>
+#include <linux/clk-provider.h>
 #include <linux/err.h>
 #include <linux/export.h>
 #include <linux/gpio/consumer.h>
@@ -34,6 +36,8 @@
 
 /* bus for all slots */
 
+#define NUM_CLOCKS 3	// Si5351 has 3 clocks
+
 struct retrode3_bus {
 	struct gpio_descs *addrs;	// addr-gpios
 	struct gpio_descs *datas;	// data-gpios
@@ -45,6 +49,7 @@ struct retrode3_bus {
 	struct retrode3_slot *slots[4];
 	struct mutex select_lock;	// used by select_slot
 	uint32_t current_addr;
+	struct clk *clks[NUM_CLOCKS];
 };
 
 #define EOF	(1L<<24)	// 24 address lines = 16 MByte
@@ -63,5 +68,9 @@ static int read_word(struct retrode3_bus *bus);	// D0..D15
 static void write_half(struct retrode3_bus *bus, uint8_t data, int a0);	// D0..D7 (a0 = 1) or D8..D15 (a0 = 0)
 static void write_byte(struct retrode3_bus *bus, uint8_t data);	// use bit 0 of current_address
 static void write_word(struct retrode3_bus *bus, uint16_t data);	// D0..D15
+
+/* Si5351 clocks */
+static int set_frequency(struct retrode3_bus *bus, int channel, u32 frequency);
+static u32 get_frequency(struct retrode3_bus *bus, int channel);
 
 #endif

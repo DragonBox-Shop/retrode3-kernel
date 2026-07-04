@@ -296,6 +296,50 @@ static void select_slot(struct retrode3_bus *bus, struct retrode3_slot *slot)
 		mutex_unlock(&bus->select_lock);
 }
 
+/* Si5351 clocks */
+static int set_frequency(struct retrode3_bus *bus, int channel, u32 frequency)
+{
+	if (channel < 0 || channel >= ARRAY_SIZE(bus->clks) || !bus->clks[channel])
+		return -EINVAL;
+
+	if (frequency == 0) {
+		if (__clk_is_enabled(bus->clks[channel])) {
+			clk_disable_unprepare(bus->clks[channel]);
+			pr_info("Channel %d physically disabled\n", channel);
+		}
+	} else {
+		int ret = clk_set_rate(bus->clks[channel], frequency);
+		if (ret) {
+			pr_info("Channel %d: Failed to set rate to %u Hz\n", channel, frequency);
+			return ret;
+		}
+
+		if (!__clk_is_enabled(bus->clks[channel])) {
+			ret = clk_prepare_enable(bus->clks[channel]);
+			if (ret) {
+				pr_info("Channel %d: Failed to enable clock\n", channel);
+				return ret;
+			}
+			pr_info("Channel %d powered up to %u Hz\n", channel, clk_get_rate(bus->clks[channel]));
+		} else {
+			pr_info("Channel %d frequency changed to %u Hz\n", channel, clk_get_rate(bus->clks[channel]));
+		}
+	}
+
+	return 0;
+}
+
+static u32 get_frequency(struct retrode3_bus *bus, int channel)
+{
+	if (channel < 0 || channel >= ARRAY_SIZE(bus->clks) || !bus->clks[channel])
+		return -EINVAL;
+
+	if (!__clk_is_enabled(bus->clks[channel]))
+		return 0;	// disabled
+
+	return clk_get_rate(bus->clks[channel]);
+}
+
 // FIXME: make this kernel modules loaded and linked at runtime by retrode3_probe
 
 #include "retrode3_cart.c"
@@ -405,6 +449,16 @@ printk("%s: chip=%px\n", __func__, bus->addrs->desc[0]->gdev->chip);
 }
 #endif
 
+	for (i = 0; i < ARRAY_SIZE(bus->clks); i++) {
+		char clk_name[12];
+		snprintf(clk_name, sizeof(clk_name), "clk_out%d", i);
+		bus->clks[i] = devm_clk_get(&pdev->dev, clk_name);
+		if (IS_ERR(bus->clks[i])) {
+			dev_err(&pdev->dev, "Failed to resolve %s from DT\n", clk_name);
+			return PTR_ERR(bus->clks[i]);
+		}
+	}
+
 	mutex_init(&bus->select_lock);
 
 // FIXME: do we needs this grouping?
@@ -461,6 +515,12 @@ static void retrode3_remove(struct platform_device *pdev)
 {
 	struct retrode3_bus *bus = platform_get_drvdata(pdev);
 	int i;
+
+	for (i = 0; i < ARRAY_SIZE(bus->clks); i++) {
+		if (bus->clks[i] && __clk_is_enabled(bus->clks[i])) {
+			clk_disable_unprepare(bus->clks[i]);
+		}
+	}
 
 	select_slot(bus, NULL);	// deselect all slots
 
@@ -756,6 +816,41 @@ static ssize_t control_store(struct device *dev,
 }
 static DEVICE_ATTR_RW(control);
 
+static int get_channel_index(struct device_attribute *attr)
+{ // name ends in channel number
+	return attr->attr.name[strlen(attr->attr.name) - 1] - '0';
+}
+
+static ssize_t clk_frequency_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct retrode3_slot *slot = dev_get_drvdata(dev);
+	int ch = get_channel_index(attr);
+
+	return sysfs_emit(buf, "%u\n", get_frequency(slot->bus, ch));
+}
+
+static ssize_t clk_frequency_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct retrode3_slot *slot = dev_get_drvdata(dev);
+	int ch = get_channel_index(attr);
+	unsigned long target_rate;
+	int ret;
+
+	ret = kstrtoul(buf, 10, &target_rate);
+	if (ret)
+		return ret;
+
+	ret = set_frequency(slot->bus, ch, target_rate);
+	if (ret < 0)
+		return ret;
+
+	return count;
+}
+
+static DEVICE_ATTR(clock0, 0644, clk_frequency_show, clk_frequency_store);
+static DEVICE_ATTR(clock1, 0644, clk_frequency_show, clk_frequency_store);
+static DEVICE_ATTR(clock2, 0644, clk_frequency_show, clk_frequency_store);
+
 static struct attribute *retrode3_attrs[] = {
 	&dev_attr_sense.attr,
 	&dev_attr_vcc.attr,
@@ -764,9 +859,35 @@ static struct attribute *retrode3_attrs[] = {
 	&dev_attr_data16.attr,
 	&dev_attr_raw16.attr,
 	&dev_attr_control.attr,
+	&dev_attr_clock0.attr,
+	&dev_attr_clock1.attr,
+	&dev_attr_clock2.attr,
 	NULL,
 };
-ATTRIBUTE_GROUPS(retrode3);
+
+static umode_t retrode3_attr_visibility(struct kobject *kobj, struct attribute *attr, int index) {
+
+	// nur für SNES-Slot!
+	// sollte anders gelöst werden (device-Tree sollte beschreiben wer die Attribute hat)
+
+	if (attr == &dev_attr_clock2.attr) {
+		if (!true) {
+			return 0; // 0 bedeutet: Unsichtbar (wird nicht erstellt)
+		}
+	}
+
+	return attr->mode; // Standard-Zugriffsrechte (z.B. 0444) zurückgeben
+}
+
+static const struct attribute_group retrode3_attr_group = {
+	.attrs = retrode3_attrs,
+	.is_visible = retrode3_attr_visibility,
+};
+
+static const struct attribute_group *retrode3_groups[] = {
+	&retrode3_attr_group,
+	NULL,
+};
 
 static int __init retrode3_module_init(void)
 {
