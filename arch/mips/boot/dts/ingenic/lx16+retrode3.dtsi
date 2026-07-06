@@ -131,7 +131,7 @@
 			silabs,multisynth-source = <0>;
 			silabs,clock-source = <0>;
 			silabs,pll-master;
-			clock-frequency = <74250000>;
+			clock-frequency = <21447000>;	/* SNES master clock */
 		};
 
 		/*
@@ -149,6 +149,7 @@
 			silabs,clock-source = <0>;
 			silabs,pll-master;
 			silabs,pll-reset;
+			clock-frequency = <21447000>;
 			};
 
 		/*
@@ -428,6 +429,11 @@
 #endif
 #if APPLICATION >= 295
 		phi2-gpio =  <&gpc 26 GPIO_ACTIVE_LOW>;	// NES: CPU_M2
+#endif
+
+#if APPLICATION >= 293
+		clocks = <&clkgen 0>, <&clkgen 1>, <&clkgen 2>;
+		clock-names = "clk_out0", "clk_out1", "clk_out2";
 #endif
 		slots {
 			pinctrl-names = "default";
