@@ -1,0 +1,12 @@
+modprobe clk_si5351
+echo loaded
+while true
+do
+	for i in 10000000 1000000 100000 0
+	do
+		echo $i Hz
+		echo $i >/sys/class/retrode3/slot-snes/clock0
+		echo $i >/sys/class/retrode3/slot-snes/clock1
+		sleep 1
+	done
+done
