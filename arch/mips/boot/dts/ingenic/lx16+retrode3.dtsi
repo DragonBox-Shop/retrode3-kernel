@@ -120,45 +120,50 @@
 		/*
 		* Overwrite CLK0 configuration with:
 		* - 8 mA output drive strength
+		* - initialize output as floating
 		* - PLL0 as clock source of multisynth 0
 		* - Multisynth 0 as clock source of output divider
 		* - Multisynth 0 can change PLL0
-		* - Set initial clock frequency of 74.25MHz
 		*/
-		clkout@0 {
+		snes_master: clkout@0 {
 			reg = <0>;
 			silabs,drive-strength = <8>;
 			silabs,multisynth-source = <0>;
 			silabs,clock-source = <0>;
 			silabs,pll-master;
-			clock-frequency = <21447000>;	/* SNES master clock */
+			silabs,disable-state = <2>;
+			clock-frequency = <8000000>;
 		};
 
 		/*
 		* Overwrite CLK1 configuration with:
-		* - 4 mA output drive strength
+		* - 8 mA output drive strength
+		* - initialize output as floating
 		* - PLL1 as clock source of multisynth 1
 		* - Multisynth 1 as clock source of output divider
 		* - Multisynth 1 can change PLL1
 		* - Reset PLL1 when enabling this clock output
 		*/
-		clkout@1 {
+		snes_cpu: clkout@1 {
 			reg = <1>;
-			silabs,drive-strength = <4>;
+			silabs,drive-strength = <8>;
 			silabs,multisynth-source = <1>;
 			silabs,clock-source = <0>;
 			silabs,pll-master;
 			silabs,pll-reset;
-			clock-frequency = <21447000>;
+			silabs,disable-state = <2>;
+			clock-frequency = <8000000>;
 			};
 
 		/*
 		* Overwrite CLK2 configuration with:
 		* - XTAL as clock source of output divider
 		*/
-		clkout@2 {
+		snes_cic: clkout@2 {
 			reg = <2>;
-			silabs,clock-source = <2>;
+			silabs,clock-source = <0>;
+			silabs,clock-disable-state = <0>;
+			clock-frequency = <8000000>;
 		};
 	};
 };
