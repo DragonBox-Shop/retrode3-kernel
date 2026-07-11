@@ -70,7 +70,7 @@ static void write_byte(struct retrode3_bus *bus, uint8_t data);	// use bit 0 of 
 static void write_word(struct retrode3_bus *bus, uint16_t data);	// D0..D15
 
 /* Si5351 clocks */
-static int set_frequency(struct retrode3_bus *bus, int channel, u32 frequency);
-static u32 get_frequency(struct retrode3_bus *bus, int channel);
+static int set_frequency(struct retrode3_bus *bus, int channel, unsigned long frequency);
+static unsigned long get_frequency(struct retrode3_bus *bus, int channel);
 
 #endif

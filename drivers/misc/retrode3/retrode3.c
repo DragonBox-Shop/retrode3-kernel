@@ -297,7 +297,7 @@ static void select_slot(struct retrode3_bus *bus, struct retrode3_slot *slot)
 }
 
 /* Si5351 clocks */
-static int set_frequency(struct retrode3_bus *bus, int channel, u32 frequency)
+static int set_frequency(struct retrode3_bus *bus, int channel, unsigned long frequency)
 {
 	if (channel < 0 || channel >= ARRAY_SIZE(bus->clks) || !bus->clks[channel])
 		return -EINVAL;
@@ -310,7 +310,7 @@ static int set_frequency(struct retrode3_bus *bus, int channel, u32 frequency)
 	} else {
 		int ret = clk_set_rate(bus->clks[channel], frequency);
 		if (ret) {
-			pr_info("Channel %d: Failed to set rate to %u Hz\n", channel, frequency);
+			pr_info("Channel %d: Failed to set rate to %lu Hz\n", channel, frequency);
 			return ret;
 		}
 
@@ -320,16 +320,16 @@ static int set_frequency(struct retrode3_bus *bus, int channel, u32 frequency)
 				pr_info("Channel %d: Failed to enable clock\n", channel);
 				return ret;
 			}
-			pr_info("Channel %d powered up to %u Hz\n", channel, clk_get_rate(bus->clks[channel]));
+			pr_info("Channel %d powered up to %lu Hz\n", channel, clk_get_rate(bus->clks[channel]));
 		} else {
-			pr_info("Channel %d frequency changed to %u Hz\n", channel, clk_get_rate(bus->clks[channel]));
+			pr_info("Channel %d frequency changed to %lu Hz\n", channel, clk_get_rate(bus->clks[channel]));
 		}
 	}
 
 	return 0;
 }
 
-static u32 get_frequency(struct retrode3_bus *bus, int channel)
+static unsigned long get_frequency(struct retrode3_bus *bus, int channel)
 {
 	if (channel < 0 || channel >= ARRAY_SIZE(bus->clks) || !bus->clks[channel])
 		return -EINVAL;
@@ -826,7 +826,7 @@ static ssize_t clk_frequency_show(struct device *dev, struct device_attribute *a
 	struct retrode3_slot *slot = dev_get_drvdata(dev);
 	int ch = get_channel_index(attr);
 
-	return sysfs_emit(buf, "%u\n", get_frequency(slot->bus, ch));
+	return sysfs_emit(buf, "%lu\n", get_frequency(slot->bus, ch));
 }
 
 static ssize_t clk_frequency_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
