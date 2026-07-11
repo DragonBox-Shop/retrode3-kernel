@@ -511,6 +511,8 @@ static int si5351_pll_set_rate(struct clk_hw *hw, unsigned long rate,
 	u8 reg = (hwdata->num == 0) ? SI5351_PLLA_PARAMETERS :
 		SI5351_PLLB_PARAMETERS;
 
+printk("%s %d: rate=%lu parent_rate=%lu\n", __func__, __LINE__, rate, parent_rate);
+
 	/* write multisynth parameters */
 	si5351_write_parameters(hwdata->drvdata, reg, &hwdata->params);
 
@@ -525,7 +527,7 @@ static int si5351_pll_set_rate(struct clk_hw *hw, unsigned long rate,
 				 hwdata->num == 0 ? SI5351_PLL_RESET_A :
 						    SI5351_PLL_RESET_B);
 
-	dev_dbg(&hwdata->drvdata->client->dev,
+	dev_info(&hwdata->drvdata->client->dev,
 		"%s - %s: p1 = %lu, p2 = %lu, p3 = %lu, parent_rate = %lu, rate = %lu\n",
 		__func__, clk_hw_get_name(hw),
 		hwdata->params.p1, hwdata->params.p2, hwdata->params.p3,
@@ -768,6 +770,8 @@ static int si5351_msynth_set_rate(struct clk_hw *hw, unsigned long rate,
 	u8 reg = si5351_msynth_params_address(hwdata->num);
 	int divby4 = 0;
 
+printk("%s %d: rate=%lu parent_rate=%lu\n", __func__, __LINE__, rate, parent_rate);
+
 	/* write multisynth parameters */
 	si5351_write_parameters(hwdata->drvdata, reg, &hwdata->params);
 
@@ -784,7 +788,7 @@ static int si5351_msynth_set_rate(struct clk_hw *hw, unsigned long rate,
 			(hwdata->params.p2 == 0) ? SI5351_CLK_INTEGER_MODE : 0);
 	}
 
-	dev_dbg(&hwdata->drvdata->client->dev,
+	dev_info(&hwdata->drvdata->client->dev,
 		"%s - %s: p1 = %lu, p2 = %lu, p3 = %lu, divby4 = %d, parent_rate = %lu, rate = %lu\n",
 		__func__, clk_hw_get_name(hw),
 		hwdata->params.p1, hwdata->params.p2, hwdata->params.p3,
@@ -882,6 +886,8 @@ static int _si5351_clkout_set_disable_state(
 	u8 mask = SI5351_CLK_DISABLE_STATE_MASK << shift;
 	u8 val;
 
+printk("%s %d: num=%d state=%d\n", __func__, __LINE__, num, state);
+
 	if (num > 8)
 		return -EINVAL;
 
@@ -901,6 +907,8 @@ static int _si5351_clkout_set_disable_state(
 	default:
 		return 0;
 	}
+
+printk("%s %d: reg=%d mask=%08x val=%08x\n", __func__, __LINE__, reg, mask, val << shift);
 
 	si5351_set_bits(drvdata, reg, mask, val << shift);
 
@@ -1280,6 +1288,8 @@ static int si5351_dt_parse(struct i2c_client *client,
 			goto put_child;
 		}
 
+printk("%s %d: num=%d\n", __func__, __LINE__, num);
+
 		if (num >= 8 ||
 		    (variant == SI5351_VARIANT_A3 && num >= 3)) {
 			dev_err(&client->dev, "invalid clkout %d\n", num);
@@ -1379,10 +1389,13 @@ static int si5351_dt_parse(struct i2c_client *client,
 					val, num);
 				goto put_child;
 			}
+printk("%s %d: num=%d val=%d state=%d\n", __func__, __LINE__, num, val, pdata->clkout[num].disable_state);
 		}
 
-		if (!of_property_read_u32(child, "clock-frequency", &val))
+		if (!of_property_read_u32(child, "clock-frequency", &val)) {
 			pdata->clkout[num].rate = val;
+printk("%s %d: num=%d rate=%u\n", __func__, __LINE__, num, pdata->clkout[num].rate);
+}
 
 		pdata->clkout[num].pll_master =
 			of_property_read_bool(child, "silabs,pll-master");
