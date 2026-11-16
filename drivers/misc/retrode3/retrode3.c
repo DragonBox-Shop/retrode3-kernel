@@ -25,6 +25,7 @@ dazu retrode3_device mit Pointer auf den bus
  */
 
 #include "retrode3_bus.h"
+#include <linux/delay.h>
 
 /* low level address and data bus access */
 
@@ -115,6 +116,11 @@ static inline int read_half(struct retrode3_bus *bus, int a0)
 	uint8_t data;
 
 	set_bus_bit(bus->oe, 0);	// this is the pin level although we have defined "active low" in the DTS
+	/*
+	 * Diagnostic: ROM outputs and level shifters need time to settle.
+	 * D8 or D0 is sampled first; otherwise its pull-up may still read 1.
+	 */
+	udelay(1);
 	data = get_half(bus, a0);
 	set_bus_bit(bus->oe, 1);
 
@@ -155,6 +161,8 @@ static inline int read_word(struct retrode3_bus *bus)
 	int data;
 
 	set_bus_bit(bus->oe, 0);	// this is the pin level although we have "active low"
+	/* Diagnostic: wait for /OE data valid before the first GPIO read (D0). */
+	udelay(1);
 	data = get_word(bus);
 	set_bus_bit(bus->oe, 1);
 
