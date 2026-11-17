@@ -188,9 +188,10 @@
 #endif
 
 &leds {
-	heartbeat: led-0 {
-		linux,default-trigger = "heartbeat";
-		function = LED_FUNCTION_HEARTBEAT;
+	power_led: led-0 {
+		linux,default-trigger = "none";
+		default-state = "on";
+		function = LED_FUNCTION_POWER;
 #if APPLICATION < 294
 		gpios = <&gpc 0 GPIO_ACTIVE_HIGH>;
 		color = <LED_COLOR_ID_RED>;
@@ -228,7 +229,8 @@
 #endif
 
 	md_led: led-3 {
-		linux,default-trigger = "heartbeat";
+		linux,default-trigger = "retrode3-slot-md";
+		default-state = "off";
 		function = LED_FUNCTION_PROGRAMMING;
 		function-enumerator = <2>;	// match slot number
 #if APPLICATION < 294
@@ -241,7 +243,8 @@
 	};
 
 	nes_led: led-4 {
-		linux,default-trigger = "heartbeat";
+		linux,default-trigger = "retrode3-slot-nes";
+		default-state = "off";
 		function = LED_FUNCTION_PROGRAMMING;
 		function-enumerator = <1>;	// match slot number
 #if APPLICATION < 294
@@ -256,7 +259,8 @@
 #if APPLICATION >= 292	// stimmt das?
 
 	snes_led: led-5 {
-		linux,default-trigger = "heartbeat";
+		linux,default-trigger = "retrode3-slot-snes";
+		default-state = "off";
 		function = LED_FUNCTION_PROGRAMMING;
 		function-enumerator = <0>;	// match slot number
 #if APPLICATION < 294
@@ -274,7 +278,8 @@
 	/* this setup also runs on retrode 2.9.4 - just the two new LEDs are not available in hardware */
 
 	left_controller_led: led-6 {
-		linux,default-trigger = "heartbeat";
+		linux,default-trigger = "none";
+		default-state = "off";
 		function = LED_FUNCTION_PROGRAMMING;
 		function-enumerator = <3>;
 		gpios = <&cic 6 GPIO_ACTIVE_HIGH>;
@@ -282,7 +287,8 @@
 	};
 
 	right_controller_led: led-7 {
-		linux,default-trigger = "heartbeat";
+		linux,default-trigger = "none";
+		default-state = "off";
 		function = LED_FUNCTION_PROGRAMMING;
 		function-enumerator = <4>;	// right game controller
 		gpios = <&cic 7 GPIO_ACTIVE_HIGH>;
