@@ -350,12 +350,42 @@ static unsigned long get_frequency(struct retrode3_bus *bus, int channel)
 #include "retrode3_cart.c"
 #include "retrode3_controller.c"
 
+/* Stop workers first: neither GPIOs nor child devices may be released while
+ * a cartridge-detect or game-controller poll is still running.
+ */
+static void retrode3_unregister_slots(struct retrode3_bus *bus)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(bus->slots); i++) {
+		if (bus->slots[i])
+			cancel_delayed_work_sync(&bus->slots[i]->work);
+	}
+
+	select_slot(bus, NULL);
+
+	for (i = 0; i < ARRAY_SIZE(bus->slots); i++) {
+		struct retrode3_slot *slot = bus->slots[i];
+
+		if (!slot)
+			continue;
+
+		if (slot->is_controller) {
+			device_unregister(&slot->dev);
+		} else {
+			cdev_device_del(&slot->cdev, &slot->dev);
+			put_device(&slot->dev);
+		}
+		bus->slots[i] = NULL;
+	}
+}
+
 /* bus driver probe */
 
 static int retrode3_probe(struct platform_device *pdev)
 {
         struct retrode3_bus *bus;
-        int i;
+        int i, ret;
 	struct device_node *slots, *child = NULL;
 
         dev_dbg(&pdev->dev, "%s\n", __func__);
@@ -469,51 +499,68 @@ printk("%s: chip=%px\n", __func__, bus->addrs->desc[0]->gdev->chip);
 // FIXME: do we needs this grouping?
 
 	slots = of_get_child_by_name(pdev->dev.of_node, "slots");
+	if (!slots) {
+		ret = -ENODEV;
+		goto err_destroy_mutex;
+	}
+
 	i = 0;
 	while ((child = of_get_next_child(slots, child))) {
 		struct retrode3_slot *slot;
-		int ret;
 
-// printk("%s: slot %d\n", __func__, i);
 		if (i >= ARRAY_SIZE(bus->slots)) {
-			dev_err(&slot->dev, "too many slots\n");
-			return -EINVAL;
+			dev_err(&pdev->dev, "too many slots\n");
+			ret = -EINVAL;
+			goto err_unregister_slots;
 		}
 
-		slot = devm_kzalloc(&pdev->dev, sizeof(*slot), GFP_KERNEL);
-		if (!slot)
-			return -ENOMEM;
+		/* Child device lifetime is controlled by its release callback,
+		 * not by the platform device's managed allocations.
+		 */
+		slot = kzalloc(sizeof(*slot), GFP_KERNEL);
+		if (!slot) {
+			ret = -ENOMEM;
+			goto err_unregister_slots;
+		}
 
-		bus->slots[i] = slot;
+		slot->id = -1;
 		slot->bus = bus;
 		slot->dev.parent = &pdev->dev;
 
-// FIXME: should load bus client driver through matching .compatible
-// like i2c bus is doing
-
-		if (of_property_match_string(child, "compatible", "openpandora,retrode3-slot") >= 0)
+		if (of_property_match_string(child, "compatible",
+					     "openpandora,retrode3-slot") >= 0) {
 			ret = retrode3_probe_slot(slot, child);
-		else if (of_property_match_string(child, "compatible", "openpandora,retrode3-controller") >= 0)
-			{ /*continue;*/ ret = retrode3_probe_controller(slot, child);}
-		else {
-			dev_err(&slot->dev, "unknown child type\n");
-			return -EINVAL;
+		} else if (of_property_match_string(child, "compatible",
+						    "openpandora,retrode3-controller") >= 0) {
+			slot->is_controller = true;
+			ret = retrode3_probe_controller(slot, child);
+		} else {
+			dev_err(&pdev->dev, "unknown child type\n");
+			kfree(slot);
+			ret = -EINVAL;
+			goto err_unregister_slots;
 		}
 
+		/* Both child probe functions release slot on failure. */
 		if (ret < 0)
-			return ret;
+			goto err_unregister_slots;
 
-		dev_dbg(&pdev->dev, "%s added\n", __func__);
-		i++;	// next slot
+		bus->slots[i++] = slot;
 	}
+	of_node_put(slots);
 
-	select_slot(bus, NULL);	// deselect all slots
+	select_slot(bus, NULL);
+	platform_set_drvdata(pdev, bus);
+	dev_dbg(&pdev->dev, "%s successful\n", __func__);
+	return 0;
 
-        platform_set_drvdata(pdev, bus);
-
-        dev_dbg(&pdev->dev, "%s successful\n", __func__);
-
-        return 0;
+err_unregister_slots:
+	of_node_put(child);
+	of_node_put(slots);
+	retrode3_unregister_slots(bus);
+err_destroy_mutex:
+	mutex_destroy(&bus->select_lock);
+	return ret;
 }
 
 static void retrode3_remove(struct platform_device *pdev)
@@ -521,19 +568,11 @@ static void retrode3_remove(struct platform_device *pdev)
 	struct retrode3_bus *bus = platform_get_drvdata(pdev);
 	int i;
 
+	retrode3_unregister_slots(bus);
+
 	for (i = 0; i < ARRAY_SIZE(bus->clks); i++) {
-		if (bus->clks[i] && __clk_is_enabled(bus->clks[i])) {
+		if (bus->clks[i] && __clk_is_enabled(bus->clks[i]))
 			clk_disable_unprepare(bus->clks[i]);
-		}
-	}
-
-	select_slot(bus, NULL);	// deselect all slots
-
-	for (i=0; i<ARRAY_SIZE(bus->slots); i++) {
-		struct retrode3_slot *slot = bus->slots[i];
-
-		cancel_delayed_work_sync(&slot->work);
-		cdev_device_del(&slot->cdev, &slot->dev);
 	}
 
 	mutex_destroy(&bus->select_lock);
@@ -932,12 +971,11 @@ err_unregister_chrdev:
 
 static void __exit retrode3_module_exit(void)
 {
-
+	/* The platform .remove callback still needs the class and the IDA. */
+	platform_driver_unregister(&retrode3_driver);
 	class_destroy(retrode3_class);
 	unregister_chrdev_region(retrode3_first, RETRODE3_MINORS);
 	ida_destroy(&retrode3_minors);
-
-	platform_driver_unregister(&retrode3_driver);
 }
 
 module_init(retrode3_module_init);
