@@ -551,6 +551,16 @@ printk("%s: chip=%px\n", __func__, bus->addrs->desc[0]->gdev->chip);
 
 	select_slot(bus, NULL);
 	platform_set_drvdata(pdev, bus);
+
+	/* Start polling only after every slot has been fully registered. */
+	for (i = 0; i < ARRAY_SIZE(bus->slots); i++) {
+		struct retrode3_slot *slot = bus->slots[i];
+
+		if (!slot)
+			continue;
+		schedule_delayed_work(&slot->work, slot->is_controller ?
+				      POLL_RATE : msecs_to_jiffies(50));
+	}
 	dev_dbg(&pdev->dev, "%s successful\n", __func__);
 	return 0;
 
