@@ -272,8 +272,7 @@ int retrode3_probe_controller(struct retrode3_slot *slot, struct device_node*chi
 	of_node_put(controller);
 
 #if 1
-	INIT_DELAYED_WORK(&slot->work, retrode3_polling_work);
-	schedule_delayed_work(&slot->work, POLL_RATE);	// start polling
+	INIT_DELAYED_WORK(&slot->work, retrode3_polling_work);	// start polling
 #endif
 
 	return 0;
