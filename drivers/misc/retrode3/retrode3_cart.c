@@ -949,7 +949,6 @@ int retrode3_probe_slot(struct retrode3_slot *slot, struct device_node *child)
 
 	slot->cd_state = -1;
 	INIT_DELAYED_WORK(&slot->work, retrode3_cd_work);
-	schedule_delayed_work(&slot->work, msecs_to_jiffies(50));
 
 	return 0;
 
