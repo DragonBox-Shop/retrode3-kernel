@@ -468,6 +468,7 @@ static void retrode3_remove(struct platform_device *pdev)
 		struct retrode3_slot *slot = bus->slots[i];
 
 		cancel_delayed_work_sync(&slot->work);
+		led_trigger_unregister_simple(slot->status_led_trigger);
 		cdev_device_del(&slot->cdev, &slot->dev);
 	}
 
