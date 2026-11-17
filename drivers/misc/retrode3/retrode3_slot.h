@@ -85,6 +85,7 @@ struct retrode3_slot {
 // nur für Spezialisierung auf memory-slot
 	struct cdev cdev;	// the /dev/slot character device
 	int id;			// slot id
+	bool is_controller;	// controller devices have no cdev
 // nur für Spezialisierung auf controller-slot
 	struct retrode3_controller controllers[4];
 // nur für MD und FRAM
