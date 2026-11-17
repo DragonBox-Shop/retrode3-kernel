@@ -848,8 +848,10 @@ static int retrode3_open(struct inode *inode, struct file *file)
 	get_device(&slot->dev);	// increment the reference count for the device
 
 	ret = generic_file_open(inode, file);
-	if (ret < 0)
+	if (ret < 0) {
+		put_device(&slot->dev);
 		return ret;
+	}
 
 	file->private_data = slot;
 
@@ -883,72 +885,78 @@ static void retrode3_slot_release(struct device *dev)
 
         dev_dbg(&slot->dev, "%s\n", __func__);
 
-	ida_free(&retrode3_minors, slot->id);
-	// FIXME: what else to release
+	if (slot->id >= 0)
+		ida_free(&retrode3_minors, slot->id);
 	kfree(slot);
 }
 
 int retrode3_probe_slot(struct retrode3_slot *slot, struct device_node *child)
 {
-	struct device *	dev = &slot->dev;
-	int id;
-	int ret;
+	struct device *dev = &slot->dev;
+	int id, ret;
 	const char *name = "unknown";
 
-	id = ida_alloc_max(&retrode3_minors, RETRODE3_MINORS-1, GFP_KERNEL);
-	if (id < 0)
-		return id;
-
-	slot->id = id;
-
+	/* The slot is kzalloc'ed, and the final device reference frees it. */
 	device_initialize(dev);
-	dev->devt = retrode3_first + id;
 	dev->class = retrode3_class;
 	dev->release = retrode3_slot_release;
 	dev_set_drvdata(dev, slot);
+
+	id = ida_alloc_max(&retrode3_minors, RETRODE3_MINORS - 1, GFP_KERNEL);
+	if (id < 0) {
+		ret = id;
+		goto err_put_device;
+	}
+	slot->id = id;
+	dev->devt = retrode3_first + id;
+
 	of_property_read_string(child, "name", &name);
-	dev_set_name(dev, "slot-%s", name);
+	ret = dev_set_name(dev, "slot-%s", name);
+	if (ret)
+		goto err_put_device;
 	dev->of_node = child;
 
-	slot->ce = devm_gpiod_get(dev, "ce", GPIOD_OUT_HIGH);	// active LOW is XORed with DT definition
-	gpiod_set_value(slot->ce, 0);	// turn inactive
+	slot->ce = devm_gpiod_get(dev, "ce", GPIOD_OUT_HIGH);
+	if (IS_ERR(slot->ce)) {
+		ret = PTR_ERR(slot->ce);
+		goto err_put_device;
+	}
+	gpiod_set_value(slot->ce, 0);
+
 	slot->cd = devm_gpiod_get(dev, "cd", GPIOD_IN);
+	if (IS_ERR(slot->cd)) {
+		ret = PTR_ERR(slot->cd);
+		goto err_put_device;
+	}
 	slot->led = devm_gpiod_get(dev, "status", GPIOD_OUT_HIGH);
 	if (!IS_ERR_OR_NULL(slot->led))
-		gpiod_set_value(slot->led, 0);	// turn inactive
+		gpiod_set_value(slot->led, 0);
 	slot->power = devm_gpiod_get(dev, "power", GPIOD_IN);
 	of_property_read_u32_index(child, "address-width", 0, &slot->addr_width);
 	of_property_read_u32_index(child, "bus-width", 0, &slot->bus_width);
 
-	// access reference "status-led" (if available)
-
 	cdev_init(&slot->cdev, &slot_fops);
 	slot->cdev.owner = THIS_MODULE;
 
-// FIXME: should be some devm_cdev_device_add
-	ret = cdev_device_add(&slot->cdev, &slot->dev);
+	ret = cdev_device_add(&slot->cdev, dev);
 	if (ret)
-		return ret;
+		goto err_put_device;
 
-	if(!IS_ERR_OR_NULL(slot->power)) {
-		if (set_slot_power_mV(slot, 3300) < 0)	// switch to 3.3V if possible
-			set_slot_power_mV(slot, 5000);	// fall back to 5V
+	if (!IS_ERR_OR_NULL(slot->power)) {
+		if (set_slot_power_mV(slot, 3300) < 0)
+			set_slot_power_mV(slot, 5000);
 	}
 
-	slot->cd_state = -1;	// enforce a state update event for initial state
-#if 1	// use polling
+	slot->cd_state = -1;
 	INIT_DELAYED_WORK(&slot->work, retrode3_cd_work);
-	schedule_delayed_work(&slot->work,
-			msecs_to_jiffies(50));	// start first check
-
-#else	// use interrupt (untested)
-	ret = devm_request_threaded_irq(dev, gpiod_to_irq(slot->cd),
-		NULL, retrode3_gpio_cd_irqt,
-		IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING | IRQF_ONESHOT,
-			"cart-detect", slot);
-#endif
+	schedule_delayed_work(&slot->work, msecs_to_jiffies(50));
 
 	return 0;
+
+err_put_device:
+	/* Also releases child devres, the minor and the slot allocation. */
+	put_device(dev);
+	return ret;
 }
 
 /*
