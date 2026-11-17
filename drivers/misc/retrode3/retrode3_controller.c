@@ -187,16 +187,22 @@ int retrode3_probe_controller(struct retrode3_slot *slot, struct device_node*chi
 
 	device_initialize(dev);
 	dev->class = retrode3_class;
-	dev->release = NULL;
+	dev->release = retrode3_slot_release;
 	dev_set_drvdata(dev, slot);
-	dev_set_name(dev, "gamecontroller");
+	ret = dev_set_name(dev, "gamecontroller");
+	if (ret)
+		goto err_put_device;
 	dev->of_node = child;
 
 	ret = device_add(dev);
 	if (ret)
-		return ret;
+		goto err_put_device;
 
 	slot->ce = devm_gpiod_get(dev, "ce", GPIOD_OUT_HIGH);	// active LOW is XORed with DT definition
+	if (IS_ERR(slot->ce)) {
+		ret = PTR_ERR(slot->ce);
+		goto err_unregister;
+	}
 	gpiod_set_value(slot->ce, 0);	// turn inactive
 
 	id = 0;
@@ -206,13 +212,19 @@ int retrode3_probe_controller(struct retrode3_slot *slot, struct device_node*chi
 		dev_info(&slot->dev, "add game controller %d\n", id);
 
 		input_dev = devm_input_allocate_device(dev);
-		if (!input_dev)
-			return -ENOMEM;
+		if (!input_dev) {
+			ret = -ENOMEM;
+			goto err_unregister;
+		}
 
 		slot->controllers[id].input = input_dev;
 
-		input_dev->name = kasprintf(GFP_KERNEL, "Retrode 3 Game Controller %d", id);
-		input_dev->phys = kasprintf(GFP_KERNEL, "%s/input%d", dev_name(dev), id);
+		input_dev->name = devm_kasprintf(dev, GFP_KERNEL, "Retrode 3 Game Controller %d", id);
+		input_dev->phys = devm_kasprintf(dev, GFP_KERNEL, "%s/input%d", dev_name(dev), id);
+		if (!input_dev->name || !input_dev->phys) {
+			ret = -ENOMEM;
+			goto err_unregister;
+		}
 
 		input_dev->id.bustype = BUS_GAMEPORT;
 
@@ -248,7 +260,7 @@ int retrode3_probe_controller(struct retrode3_slot *slot, struct device_node*chi
 		ret = input_register_device(input_dev);
 		if (ret) {
 			dev_err(dev, "Failed to register input device: %d\n", ret);
-			return ret;
+			goto err_unregister;
 		}
 
 		of_property_read_u32(controller, "data-offset", &slot->controllers[id].data_offset);
@@ -257,6 +269,7 @@ int retrode3_probe_controller(struct retrode3_slot *slot, struct device_node*chi
 
 		id++;
 	}
+	of_node_put(controller);
 
 #if 1
 	INIT_DELAYED_WORK(&slot->work, retrode3_polling_work);
@@ -264,6 +277,15 @@ int retrode3_probe_controller(struct retrode3_slot *slot, struct device_node*chi
 #endif
 
 	return 0;
+
+err_unregister:
+	of_node_put(controller);
+	device_unregister(dev);
+	return ret;
+
+err_put_device:
+	put_device(dev);
+	return ret;
 }
 
 #if FIXME
