@@ -22,6 +22,7 @@
 #include <linux/gpio/driver.h>
 #include <linux/init.h>
 #include <linux/input.h>
+#include <linux/leds.h>
 #include <linux/io.h>
 #include <linux/miscdevice.h>
 #include <linux/module.h>
@@ -76,7 +77,8 @@ struct retrode3_slot {
 	struct retrode3_bus *bus;	// backpointer to bus
 	struct gpio_desc *ce;	// slot enable
 	struct gpio_desc *cd;	// slot detect
-	struct gpio_desc *led;	// status led (optional)
+	struct led_trigger *status_led_trigger;	// LED class trigger (optional)
+	char status_led_trigger_name[48];
 	struct gpio_desc *power;	// power control (optional)
 	struct delayed_work work;
 	int cd_state;
