@@ -15,6 +15,7 @@
 
 #include "retrode3_bus.h"
 #include <linux/delay.h>
+#include <linux/errno.h>
 
 // #define RETRODE3_MAJOR FLOPPY_MAJOR
 #define RETRODE3_MINORS	16
@@ -31,6 +32,23 @@ static struct class *retrode3_class;
 #define IS_MD()	(mode >= MD_ROM && mode <= MD_EEPMODE)
 #define IS_SNES()	(mode == SNES_REGULAR || mode == SNES_HIROM)
 #define IS_NES()	(mode >= NES_PRG && mode <= NES_WRAM)
+
+/*
+ * Adapter transport is deliberately narrower than a programmable bus.
+ * Passive 8-bit reads may use a selected lane irrespective of A0;
+ * physical connector/voltage/timing must still be validated separately.
+ * Never expose this on the NES socket, whose high data lane is the PPU bus.
+ */
+static bool retrode3_adapter_read_allowed(struct retrode3_slot *slot,
+						  u32 mode)
+{
+	bool md = of_device_is_compatible(slot->dev.of_node,
+			"openpandora,retrode3-slot-megadrive");
+	bool snes = of_device_is_compatible(slot->dev.of_node,
+			"openpandora,retrode3-slot-snes");
+
+	return retrode3_adapter_lane_allowed(mode, slot->bus_width, md, snes);
+}
 
 /* MegaDrive special gpio control */
 
@@ -158,6 +176,22 @@ static ssize_t retrode3_read(struct file *file, char __user *buf,
 
 	read = 0;
 
+	/*
+	 * Keep adapter access read-only, allowlisted by physical slot, and
+	 * bounded to the slot's address pins before selecting any hardware.
+	 * This mode neither selects a voltage nor changes data direction.
+	 */
+	if (retrode3_adapter_mode_is_read(mode)) {
+		if (!retrode3_adapter_read_allowed(slot, mode))
+			return -EOPNOTSUPP;
+		/* Sonic 3 FRAM state never belongs to passive adapters. */
+		if (slot->fram_mode)
+			return -EBUSY;
+		if (!slot->addr_width || slot->addr_width > 24 ||
+		    (u64)addr + count > (1ULL << slot->addr_width))
+			return -ERANGE;
+	}
+
 	if (slot->bus_width != 16 || !slot->fram_mode)
 		select_slot(slot->bus, slot);	// activate cart enable
 
@@ -213,7 +247,18 @@ static ssize_t retrode3_read(struct file *file, char __user *buf,
 		} else {
 			uint8_t byte;
 
-			if (slot->bus_width == 16) { // megadrive
+			if (retrode3_adapter_mode_is_read(mode)) {
+				/*
+				 * Explicit fixed 8-bit lane: no MD word reads and no
+				 * A0-dependent byte-lane selection. read_half() pulses OE.
+				 * No cartridge/mapper register write occurs here.
+				 */
+				err = _set_address(mode, slot, addr);
+				if (err < 0)
+					goto failed;
+				byte = err = read_half(slot->bus,
+					mode == RETRODE3_ADAPTER_READ_D0_D7 ? 1 : 0);
+			} else if (slot->bus_width == 16) { // megadrive
 				switch (mode) {
 					case MD_TIME:
 						err = _set_address(mode, slot, addr);	// 24 bit address and A0 determines lower/upper byte
@@ -413,6 +458,10 @@ static ssize_t retrode3_write(struct file *file, const char __user *buf,
 // dev_info(&slot->dev, "%s: ppos=%08llx (fram=%d mode=%d addr=%x) count=%ld\n", __func__, *ppos, slot->fram_mode, mode, addr, count);
 
 	written = 0;
+
+	/* Adapter lane modes must never perform a write cycle. */
+	if (retrode3_adapter_mode_is_read(mode))
+		return -EOPNOTSUPP;
 
 	if ((slot->bus_width != 16 || !slot->fram_mode) && mode != MD_ENSRAM)
 		select_slot(slot->bus, slot);	// activate cart enable

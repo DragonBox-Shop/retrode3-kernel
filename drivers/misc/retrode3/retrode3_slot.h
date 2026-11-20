@@ -32,6 +32,8 @@
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 #include <linux/uio.h>
+#include "retrode3_adapter_mode.h"
+
 
 /* special mode constants - should be exported as ABI to user-space */
 
