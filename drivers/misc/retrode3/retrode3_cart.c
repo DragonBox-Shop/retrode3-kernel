@@ -193,6 +193,10 @@ static ssize_t retrode3_read(struct file *file, char __user *buf,
 	}
 
 	if (retrode3_adapter_mode_is_read(mode)) {
+		/* Do not even select an adapter after the cartridge was removed. */
+		err = gpiod_get_value(slot->cd);
+		if (err <= 0)
+			return err < 0 ? err : -ENODEV;
 		/*
 		 * SMS-0007 on the MD socket maps A21 to /WR and A22 to /RD.
 		 * Do NOT select /CE before the caller's full address (including
