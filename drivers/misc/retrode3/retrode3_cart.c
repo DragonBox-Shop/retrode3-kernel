@@ -192,8 +192,29 @@ static ssize_t retrode3_read(struct file *file, char __user *buf,
 			return -ERANGE;
 	}
 
-	if (slot->bus_width != 16 || !slot->fram_mode)
-		select_slot(slot->bus, slot);	// activate cart enable
+	if (retrode3_adapter_mode_is_read(mode)) {
+		/*
+		 * SMS-0007 on the MD socket maps A21 to /WR and A22 to /RD.
+		 * Do NOT select /CE before the caller's full address (including
+		 * the inactive /WR level) has been driven on the GPIO bus.
+		 * Keep OE inactive, the data bus released and the kernel WE/TIME
+		 * lines inactive until after the address has settled.
+		 * This applies to BOTH adapter lanes and leaves legacy modes alone.
+		 */
+		select_slot(slot->bus, NULL);
+		set_bus_bit(slot->bus->oe, 1);	/* physical OE inactive */
+		gpiod_set_value(slot->bus->we->desc[0], 0);
+		gpiod_set_value(slot->bus->we->desc[1], 0);
+		gpiod_set_value(slot->bus->time, 0);
+		end_drive_word(slot->bus);
+		err = _set_address(mode, slot, addr);
+		if (err < 0)
+			return err;
+		if (count)
+			select_slot(slot->bus, slot);
+	} else if (slot->bus_width != 16 || !slot->fram_mode) {
+		select_slot(slot->bus, slot);	// legacy slot activation
+	}
 
 	if (addr + count >= EOF) {
 		if (addr >= EOF)
@@ -248,6 +269,16 @@ static ssize_t retrode3_read(struct file *file, char __user *buf,
 			uint8_t byte;
 
 			if (retrode3_adapter_mode_is_read(mode)) {
+				/*
+				 * An adapter can be unplugged during a block read.
+				 * Stop issuing bus cycles as soon as slot sense drops.
+				 */
+				err = gpiod_get_value(slot->cd);
+				if (err <= 0) {
+					if (err == 0)
+						err = -ENODEV;
+					goto failed;
+				}
 				/*
 				 * Explicit fixed 8-bit lane: no MD word reads and no
 				 * A0-dependent byte-lane selection. read_half() pulses OE.
