@@ -1,0 +1,998 @@
+// SPDX-License-Identifier: GPL-2.0
+
+/*
+ * based on ideas and fragments from
+ *  drivers/char/mem.c
+ *  drivers/gnss/core.c
+ *  arch/arm/common/locomo.c
+
+- 8 bit vs. 16 bit bus width
+- add read/write for RAM
+
+Idee:
+	aufsplitten in BUS openpandora,retrode3 (wie i2c-core)
+	und 2 Arten Device-Treiber on demand laden
+	openpandora,retrode3-slot
+	openpandora,retrode3-controller
+	d.h. einfach über "compatible"
+
+dazu retrode3_device mit Pointer auf den bus
+
+
+ *
+ *  Copyright (C) 2022-26, H. Nikolaus Schaller
+ *
+ */
+
+#include "retrode3_bus.h"
+#include <linux/delay.h>
+
+/* low level address and data bus access */
+
+// FXIME: get_multiple / set_multiple could be much faster, if supported by device driver
+
+static inline int get_bus_bit(struct gpio_desc *desc)
+{
+#if 1
+	struct gpio_chip *gc = desc->gdev->chip;
+	return gc->get(gc, gpiod_hwgpio(desc));
+#else
+	return gpiod_get_value(desc);
+#endif
+
+}
+
+static inline int set_bus_bit(struct gpio_desc *desc, int value)
+{
+#if 1	// speed optimized direct call
+	struct gpio_chip *gc = desc->gdev->chip;
+	// can we use set_multiple?
+// printk("%s: %px set=%pS set=%pS\n", __func__, gc, gc->set, gc->set);
+	return gc->set(gc, gpiod_hwgpio(desc), value);
+#else
+	return gpiod_set_value(desc, value);
+#endif
+}
+
+/* access to cart bus */
+
+static inline int set_address(struct retrode3_bus *bus, uint32_t addr)
+{ /* set address on all gpios */
+	int a;
+
+// printk("%s: bus %px addr %08x\n", __func__, bus, addr);
+
+	if (addr == bus->current_addr)
+		return 0;	// no real change
+
+	if (addr >= EOF)
+		return -EINVAL;
+
+	for (a = 0; a < bus->addrs->ndescs; a++) {
+		if ((addr ^ bus->current_addr) & (1 << a))	{ // address bit has really changed
+// printk("%s: %d -> %d\n", __func__, a, (addr >> a) & 1);
+			set_bus_bit(bus->addrs->desc[a], (addr >> a) & 1);
+		}
+	}
+
+	bus->current_addr = addr;
+	return 0;
+}
+
+// FIXME: force to switch direction of D lines to input? Or rely on write turning them back?
+
+static inline int get_half(struct retrode3_bus *bus, int a0)
+{ /* read data from data lines D0..D7 (a0 = 1) or D8..D15 (a0 = 0) */
+	int d;
+	uint8_t data;
+// printk("%s: a0=%d\n", __func__, a0);
+
+	/* read 8 data bits either on D0..D7 (a0 = 1) or D8..D15 (a0 = 0) */
+	data = 0;
+	if(a0)
+		for (d = 0; d < bus->datas->ndescs-8; d++) {
+			int bit = get_bus_bit(bus->datas->desc[d]);
+// printk("%s: bit %d=%d\n", __func__, d, bit);
+			if (bit < 0)
+				return bit;
+			data |= bit << d;
+		}
+	else
+		for (d = 8; d < bus->datas->ndescs; d++) {
+			int bit = get_bus_bit(bus->datas->desc[d]);
+// printk("%s: bit %d=%d\n", __func__, d, bit);
+			if (bit < 0)
+				return bit;
+			data |= bit << (d-8);
+		}
+
+// printk("%s: data=%02x\n", __func__, data);
+
+	return data;
+}
+
+static inline int read_half(struct retrode3_bus *bus, int a0)
+{ /* read data from data lines D0..D7 (a0 = 1) or D8..D15 (a0 = 0) with OE */
+	uint8_t data;
+
+	set_bus_bit(bus->oe, 0);	// this is the pin level although we have defined "active low" in the DTS
+	/* Let ROM outputs and level shifters settle before sampling data. */
+	udelay(1);
+	data = get_half(bus, a0);
+	set_bus_bit(bus->oe, 1);
+
+	return data;
+}
+
+static inline int read_byte(struct retrode3_bus *bus)
+{ /* read data from data lines */
+	return read_half(bus, bus->current_addr & 1);
+}
+
+static inline int get_word(struct retrode3_bus *bus)
+{ /* read data from data lines */
+	int d;
+	uint16_t data;
+
+// printk("%s:\n", __func__);
+
+	/* read 16 data bits */
+	data = 0;
+	for (d = 0; d < bus->datas->ndescs; d++) {
+		int bit = get_bus_bit(bus->datas->desc[d]);
+
+// printk("bit=%d\n", bit);
+
+		if (bit < 0)
+			return bit;
+		data |= bit << d;
+	}
+
+// printk("%s: data=%02x\n", __func__, data);
+
+	return data;
+}
+
+static inline int read_word(struct retrode3_bus *bus)
+{ /* read data from data lines */
+	int data;
+
+	set_bus_bit(bus->oe, 0);	// this is the pin level although we have "active low"
+	/* Let ROM outputs and level shifters settle before sampling data. */
+	udelay(1);
+	data = get_word(bus);
+	set_bus_bit(bus->oe, 1);
+
+	return data;
+}
+
+static inline void set_half(struct retrode3_bus *bus, uint8_t data, int a0)
+{ /* set D0..D7 (a0 = 1) or D8..D15 (a0 = 0) */
+	int d;
+	/* set data bits */
+
+// printk("%s:\n", __func__);
+
+	if(a0) { // D0..D7
+		for (d = 0; d < bus->datas->ndescs-8; d++) {
+			gpiod_direction_output(bus->datas->desc[d], (data>>d) & 1);
+		}
+	} else { // D8..D15
+		for (d = 8; d < bus->datas->ndescs; d++) {
+			gpiod_direction_output(bus->datas->desc[d], (data>>(d-8)) & 1);
+		}
+	}
+}
+
+static inline void drive_half(struct retrode3_bus *bus, uint8_t data, int a0)
+{ // write D0..D7 (a0 = 1) or D8..D15 (a0 = 0) with WE0 or WE8
+	set_half(bus, data, a0);
+	/* pulse write enable depending on a0 (WE8 for a0 = 1, WE0 for a0 = 0) */
+	gpiod_set_value(bus->we->desc[a0?0:1], 1);
+	gpiod_set_value(bus->we->desc[a0?0:1], 0);
+}
+
+static inline void end_drive_word(struct retrode3_bus *bus)
+{ /* switch data bus back to input */
+	int d;
+	for (d = 0; d < bus->datas->ndescs; d++) {
+		gpiod_direction_input(bus->datas->desc[d]);
+	}
+}
+
+static inline void write_half(struct retrode3_bus *bus, uint8_t data, int a0)
+{ // write D0..D7 (a0 = 1) or D8..D15 (a0 = 0) with WE0 or WE8 and switch data bus back to input
+	drive_half(bus, data, a0);
+	end_drive_word(bus);
+}
+
+static inline void write_byte(struct retrode3_bus *bus, uint8_t data)
+{ // use a0 of current_address
+	return write_half(bus, data, bus->current_addr & 1);
+}
+
+static inline void set_word(struct retrode3_bus *bus, uint16_t data)	// D0..D15
+{ /* set D0..D15 */
+	int d;
+	/* set data bits */
+
+// printk("%s:\n", __func__);
+
+	for (d = 0; d < bus->datas->ndescs; d++) {
+		gpiod_direction_output(bus->datas->desc[d], (data>>d) & 1);
+	}
+}
+
+static inline void drive_word(struct retrode3_bus *bus, uint16_t data)	// D0..D15
+{ /* write data to data lines */
+	set_word(bus, data);
+	/* pulse both write enables */
+	gpiod_set_value(bus->we->desc[0], 1);
+	gpiod_set_value(bus->we->desc[1], 1);
+	gpiod_set_value(bus->we->desc[0], 0);
+	gpiod_set_value(bus->we->desc[1], 0);
+}
+
+static inline void write_word(struct retrode3_bus *bus, uint16_t data)	// D0..D15
+{
+	drive_word(bus, data);
+	end_drive_word(bus);
+}
+
+#define CONFIG_RETRODE3_MDSLOT 294
+
+static int get_slot_power_mV(struct retrode3_slot *slot)
+{
+	if(!slot || IS_ERR_OR_NULL(slot->power))
+		return -ENODEV;
+	return gpiod_get_direction(slot->power) ? 3300 : 5000;
+}
+
+static int set_slot_power_mV(struct retrode3_slot *slot, int mV)
+{
+printk("%s: %dmV %px\n", __func__, mV, slot->power);
+
+	if (IS_ERR_OR_NULL(slot->power))
+		return -ENODEV;
+
+	switch(mV) {
+		case 5000:
+			gpiod_direction_output(slot->power, 0);	// switch to output 0
+			break;
+		case 3300:
+#if CONFIG_RETRODE3_MDSLOT == 293
+			return -EINVAL;	// broken
+#endif
+			gpiod_direction_input(slot->power);	// switch to floating
+			break;
+		default:
+printk("%s: unknown voltage %dmV\n", __func__, mV);
+			return -EINVAL;
+	}
+	return 0;
+}
+
+static int is_selected(struct retrode3_slot *slot)
+{
+	// errors are treated as selected...
+	return gpiod_get_value(slot->ce);
+}
+
+static void select_slot(struct retrode3_bus *bus, struct retrode3_slot *slot)
+{ /* control cart select */
+	int i;
+
+// printk("%s %d: %px\n", __func__, __LINE__, slot);
+
+	if (slot) {
+		if (is_selected(slot))
+			return;	// already selected (and locked)
+		mutex_lock(&bus->select_lock);	// lock until slot == NULL
+	}
+
+	/* make sure that only one or no slot is selected at any time */
+	for(i=0; i<ARRAY_SIZE(bus->slots); i++) {
+		if (!bus->slots[i])
+			continue;	// avoid to match a slot without ce
+		gpiod_set_value(bus->slots[i]->ce, (bus->slots[i] == slot) ? 1:0);
+	}
+
+	if (!slot && mutex_is_locked(&bus->select_lock))
+		mutex_unlock(&bus->select_lock);
+}
+
+/* Si5351 clocks */
+static int set_frequency(struct retrode3_bus *bus, int channel, unsigned long frequency)
+{
+	if (channel < 0 || channel >= ARRAY_SIZE(bus->clks) || !bus->clks[channel])
+		return -EINVAL;
+
+	if (frequency == 0) {
+		if (__clk_is_enabled(bus->clks[channel])) {
+			clk_disable_unprepare(bus->clks[channel]);
+			pr_info("Channel %d physically disabled\n", channel);
+		}
+	} else {
+		int ret = clk_set_rate(bus->clks[channel], frequency);
+		if (ret) {
+			pr_info("Channel %d: Failed to set rate to %lu Hz\n", channel, frequency);
+			return ret;
+		}
+
+		if (!__clk_is_enabled(bus->clks[channel])) {
+			ret = clk_prepare_enable(bus->clks[channel]);
+			if (ret) {
+				pr_info("Channel %d: Failed to enable clock\n", channel);
+				return ret;
+			}
+			pr_info("Channel %d powered up to %lu Hz\n", channel, clk_get_rate(bus->clks[channel]));
+		} else {
+			pr_info("Channel %d frequency changed to %lu Hz\n", channel, clk_get_rate(bus->clks[channel]));
+		}
+	}
+
+	return 0;
+}
+
+static unsigned long get_frequency(struct retrode3_bus *bus, int channel)
+{
+	if (channel < 0 || channel >= ARRAY_SIZE(bus->clks) || !bus->clks[channel])
+		return -EINVAL;
+
+	if (!__clk_is_enabled(bus->clks[channel]))
+		return 0;	// disabled
+
+	return clk_get_rate(bus->clks[channel]);
+}
+
+// FIXME: make this kernel modules loaded and linked at runtime by retrode3_probe
+
+#include "retrode3_cart.c"
+#include "retrode3_controller.c"
+
+/* Stop workers first: neither GPIOs nor child devices may be released while
+ * a cartridge-detect or game-controller poll is still running.
+ */
+static void retrode3_unregister_slots(struct retrode3_bus *bus)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(bus->slots); i++) {
+		if (bus->slots[i])
+			cancel_delayed_work_sync(&bus->slots[i]->work);
+	}
+
+	select_slot(bus, NULL);
+
+	for (i = 0; i < ARRAY_SIZE(bus->slots); i++) {
+		struct retrode3_slot *slot = bus->slots[i];
+
+		if (!slot)
+			continue;
+
+		if (slot->is_controller) {
+			device_unregister(&slot->dev);
+		} else {
+			cdev_device_del(&slot->cdev, &slot->dev);
+			put_device(&slot->dev);
+		}
+		bus->slots[i] = NULL;
+	}
+}
+
+/* bus driver probe */
+
+static int retrode3_probe(struct platform_device *pdev)
+{
+        struct retrode3_bus *bus;
+        int i, ret;
+	struct device_node *slots, *child = NULL;
+
+        dev_dbg(&pdev->dev, "%s\n", __func__);
+
+        if (!pdev->dev.of_node) {
+                dev_err(&pdev->dev, "No device tree data\n");
+                return EINVAL;
+        }
+
+        bus = devm_kzalloc(&pdev->dev, sizeof(*bus), GFP_KERNEL);
+        if (bus == NULL)
+                return -ENOMEM;
+
+// printk("%s: a bus=%px\n", __func__, bus);
+
+	bus->addrs = devm_gpiod_get_array(&pdev->dev, "addr", GPIOD_OUT_HIGH);
+// printk("%s: addrs=%px\n", __func__, bus->addrs);
+	if (IS_ERR(bus->addrs))
+		return PTR_ERR(bus->addrs);
+	if (bus->addrs->ndescs != 24) {
+		dev_err(&pdev->dev, "Invalid number of address gpios (%d != 24)\n",
+			bus->addrs->ndescs);
+		return -EINVAL;
+	}
+// printk("%s: addrs 1\n", __func__);
+	/* bring all address gpios in a defined state */
+	bus->current_addr = EOF - 1;
+// printk("%s: addrs 2\n", __func__);
+	set_address(bus, 0);
+// printk("%s: addrs 3\n", __func__);
+
+	bus->datas = devm_gpiod_get_array(&pdev->dev, "data", GPIOD_IN);
+// printk("%s: datas=%px\n", __func__, bus->datas);
+	if (IS_ERR(bus->datas))
+		return PTR_ERR(bus-> datas);
+	if (bus->datas->ndescs != 16) {
+		dev_err(&pdev->dev, "Invalid number of data gpios (%d != 16)\n",
+			bus->datas->ndescs);
+		return -EINVAL;
+	}
+
+	bus->oe = devm_gpiod_get(&pdev->dev, "oe", GPIOD_OUT_HIGH);	// active LOW is XORed with DT definition
+// printk("%s: oe=%px\n", __func__, bus->oe);
+	if (IS_ERR(bus->oe))
+		return PTR_ERR(bus->oe);
+	gpiod_set_value(bus->oe, 0);	// turn inactive
+
+	bus->we = devm_gpiod_get_array(&pdev->dev, "we", GPIOD_OUT_HIGH);	// active LOW is XORed with DT definition
+// printk("%s: we=%px\n", __func__, bus->we);
+	if (IS_ERR(bus->we))
+		return PTR_ERR(bus->we);
+	if (bus->we->ndescs != 2) {
+		dev_err(&pdev->dev, "Invalid number of we gpios (%d != 2)\n",
+			bus->we->ndescs);
+		return -EINVAL;
+	}
+	gpiod_set_value(bus->we->desc[0], 0);	// make both inactive
+	gpiod_set_value(bus->we->desc[1], 0);
+
+	bus->time = devm_gpiod_get(&pdev->dev, "time", GPIOD_OUT_HIGH);	// active LOW is XORed with DT definition
+// printk("%s: time=%px\n", __func__, bus->time);
+	if (IS_ERR(bus->time))
+		return PTR_ERR(bus->time);
+	gpiod_set_value(bus->time, 0);	// make inactive
+
+	bus->phi2 = devm_gpiod_get(&pdev->dev, "phi2", GPIOD_OUT_HIGH);
+printk("%s: time=%px\n", __func__, bus->phi2);
+	if (!IS_ERR(bus->phi2))
+		gpiod_set_value(bus->phi2, 0);	// make inactive
+
+	bus->reset = devm_gpiod_get(&pdev->dev, "reset", GPIOD_OUT_HIGH);	// active LOW is XORed with DT definition
+// printk("%s: reset=%px\n", __func__, bus->reset);
+	if (IS_ERR(bus->reset))
+		return PTR_ERR(bus->reset);
+	gpiod_set_value_cansleep(bus->reset, 0);	// make inactive
+
+#if 0
+printk("%s: 1\n", __func__);
+printk("%s: bus=%px\n", __func__, bus);
+printk("%s: addrs=%px\n", __func__, bus->addrs);
+printk("%s: desc[0]=%px\n", __func__, bus->addrs->desc[0]);
+printk("%s: gdev=%px\n", __func__, bus->addrs->desc[0]->gdev);
+printk("%s: chip=%px\n", __func__, bus->addrs->desc[0]->gdev->chip);
+#endif
+
+#if 0
+{
+	struct gpio_chip *gc = bus->addrs->desc[0]->gdev->chip;
+	printk("%s: get %ps\n", __func__, gc->get);
+	printk("%s: getmult %ps\n", __func__, gc->get_multiple);
+	printk("%s: set %ps\n", __func__, gc->set);
+	printk("%s: setmult %ps\n", __func__, gc->set_multiple);
+	printk("%s: dirout %ps\n", __func__, gc->direction_output);	// no direction_output_multiple!
+	printk("%s: dirin %ps\n", __func__, gc->direction_input);	// no direction_input_multiple!
+	printk("%s: setconf %ps\n", __func__, gc->set_config);
+}
+#endif
+
+	for (i = 0; i < ARRAY_SIZE(bus->clks); i++) {
+		char clk_name[12];
+		snprintf(clk_name, sizeof(clk_name), "clk_out%d", i);
+		bus->clks[i] = devm_clk_get(&pdev->dev, clk_name);
+		if (IS_ERR(bus->clks[i])) {
+			dev_err(&pdev->dev, "Failed to resolve %s from DT\n", clk_name);
+			return PTR_ERR(bus->clks[i]);
+		}
+	}
+
+	mutex_init(&bus->select_lock);
+
+// FIXME: do we needs this grouping?
+
+	slots = of_get_child_by_name(pdev->dev.of_node, "slots");
+	if (!slots) {
+		ret = -ENODEV;
+		goto err_destroy_mutex;
+	}
+
+	i = 0;
+	while ((child = of_get_next_child(slots, child))) {
+		struct retrode3_slot *slot;
+
+		if (i >= ARRAY_SIZE(bus->slots)) {
+			dev_err(&pdev->dev, "too many slots\n");
+			ret = -EINVAL;
+			goto err_unregister_slots;
+		}
+
+		/* Child device lifetime is controlled by its release callback,
+		 * not by the platform device's managed allocations.
+		 */
+		slot = kzalloc(sizeof(*slot), GFP_KERNEL);
+		if (!slot) {
+			ret = -ENOMEM;
+			goto err_unregister_slots;
+		}
+
+		slot->id = -1;
+		slot->bus = bus;
+		slot->dev.parent = &pdev->dev;
+
+		if (of_property_match_string(child, "compatible",
+					     "openpandora,retrode3-slot") >= 0) {
+			ret = retrode3_probe_slot(slot, child);
+		} else if (of_property_match_string(child, "compatible",
+						    "openpandora,retrode3-controller") >= 0) {
+			slot->is_controller = true;
+			ret = retrode3_probe_controller(slot, child);
+		} else {
+			dev_err(&pdev->dev, "unknown child type\n");
+			kfree(slot);
+			ret = -EINVAL;
+			goto err_unregister_slots;
+		}
+
+		/* Both child probe functions release slot on failure. */
+		if (ret < 0)
+			goto err_unregister_slots;
+
+		bus->slots[i++] = slot;
+	}
+	of_node_put(slots);
+
+	select_slot(bus, NULL);
+	platform_set_drvdata(pdev, bus);
+
+	/* Start polling only after every slot has been fully registered. */
+	for (i = 0; i < ARRAY_SIZE(bus->slots); i++) {
+		struct retrode3_slot *slot = bus->slots[i];
+
+		if (!slot)
+			continue;
+		schedule_delayed_work(&slot->work, slot->is_controller ?
+				      POLL_RATE : msecs_to_jiffies(50));
+	}
+	dev_dbg(&pdev->dev, "%s successful\n", __func__);
+	return 0;
+
+err_unregister_slots:
+	of_node_put(child);
+	of_node_put(slots);
+	retrode3_unregister_slots(bus);
+err_destroy_mutex:
+	mutex_destroy(&bus->select_lock);
+	return ret;
+}
+
+static void retrode3_remove(struct platform_device *pdev)
+{
+	struct retrode3_bus *bus = platform_get_drvdata(pdev);
+	int i;
+
+	retrode3_unregister_slots(bus);
+
+	for (i = 0; i < ARRAY_SIZE(bus->clks); i++) {
+		if (bus->clks[i] && __clk_is_enabled(bus->clks[i]))
+			clk_disable_unprepare(bus->clks[i]);
+	}
+
+	mutex_destroy(&bus->select_lock);
+}
+
+static const struct of_device_id retrode3_of_match[] = {
+        { .compatible = "openpandora,retrode3" },
+        {},
+};
+MODULE_DEVICE_TABLE(of, retrode3_of_match);
+
+static struct platform_driver retrode3_driver = {
+        .probe          = retrode3_probe,
+        .remove         = retrode3_remove,
+        .driver = {
+                .name   = "retrode3",
+                .owner  = THIS_MODULE,
+                .of_match_table = of_match_ptr(retrode3_of_match)
+        },
+};
+
+
+static ssize_t sense_show(struct device *dev, struct device_attribute *attr,
+				char *buf)
+{
+	struct retrode3_slot *slot = dev_get_drvdata(dev);
+
+	if (!slot || IS_ERR_OR_NULL(slot->cd))
+		return sprintf(buf, "%s\n", "unknown");
+
+// sould use sysfs_emit()
+	return sprintf(buf, "%s\n", gpiod_get_value(slot->cd)?"active":"empty");
+}
+static DEVICE_ATTR_RO(sense);
+
+static ssize_t vcc_show(struct device *dev, struct device_attribute *attr,
+				char *buf)
+{
+	struct retrode3_slot *slot = dev_get_drvdata(dev);
+	int mV = get_slot_power_mV(slot);
+
+	if (mV < 0)
+		return sprintf(buf, "fixed\n");
+
+	return sprintf(buf, "%dmV\n", mV);
+}
+
+static ssize_t vcc_store(struct device *dev,
+			   struct device_attribute *attr,
+			   const char *buf, size_t count)
+{
+	struct retrode3_slot *slot = dev_get_drvdata(dev);
+	unsigned int mV;
+	int err;
+
+	if(IS_ERR_OR_NULL(slot->power))
+		return -ENODEV;	// can't control
+
+	err = kstrtouint(buf, 10, &mV);
+	if (err < 0)
+		return err;
+
+	err = set_slot_power_mV(slot, mV);
+	if (err < 0)
+		return err;
+
+	return count;
+}
+static DEVICE_ATTR_RW(vcc);
+
+static ssize_t addr_show(struct device *dev, struct device_attribute *attr,
+				char *buf)
+{
+	struct retrode3_slot *slot = dev_get_drvdata(dev);
+
+	if (!is_selected(slot))
+		return sprintf(buf, "deselected\n");
+
+	return sprintf(buf, "%08x\n", slot->bus->current_addr);
+}
+
+static ssize_t addr_store(struct device *dev,
+			   struct device_attribute *attr,
+			   const char *buf, size_t count)
+{
+	struct retrode3_slot *slot = dev_get_drvdata(dev);
+	uint32_t addr;
+	int err;
+
+	if (strncmp(buf, "deselect", 8) == 0) {
+		end_drive_word(slot->bus);
+		select_slot(slot->bus, NULL);
+		return count;
+	}
+
+	if (!is_selected(slot))
+		select_slot(slot->bus, NULL);	// auto-deselect other slot
+
+	// check for 0x prefix?
+	err = kstrtouint(buf, 16, &addr);
+	if (err < 0)
+		return err;
+
+	select_slot(slot->bus, slot);
+	err = set_address(slot->bus, addr);
+	if (err < 0)
+		return err;
+
+	return count;
+}
+static DEVICE_ATTR_RW(addr);
+
+static ssize_t data8_show(struct device *dev, struct device_attribute *attr,
+				char *buf)
+{
+	struct retrode3_slot *slot = dev_get_drvdata(dev);
+	int byte;
+
+	if (!is_selected(slot))
+		return sprintf(buf, "deselected\n");
+
+	byte = read_byte(slot->bus);
+
+	if (byte < 0)
+		return byte;
+
+	return sprintf(buf, "%02x\n", byte);
+}
+
+static ssize_t data8_store(struct device *dev,
+			   struct device_attribute *attr,
+			   const char *buf, size_t count)
+{
+	struct retrode3_slot *slot = dev_get_drvdata(dev);
+	unsigned int value;
+	int err;
+
+	if (!is_selected(slot))
+		return -EACCES;
+
+	err = kstrtouint(buf, 16, &value);
+	if (err < 0)
+		return err;
+
+	if (value > 0x0ff)
+		return -EINVAL;
+
+	/* leave bus active */
+	drive_half(slot->bus, value, slot->bus->current_addr & 1);
+
+	return count;
+}
+static DEVICE_ATTR_RW(data8);
+
+static ssize_t data16_show(struct device *dev, struct device_attribute *attr,
+				char *buf)
+{
+	struct retrode3_slot *slot = dev_get_drvdata(dev);
+	int word;
+
+	if (!is_selected(slot))
+		return sprintf(buf, "deselected\n");
+
+	word = read_word(slot->bus);
+
+	if (word < 0)
+		return word;
+
+	return sprintf(buf, "%04x\n", word);
+}
+
+static ssize_t data16_store(struct device *dev,
+			   struct device_attribute *attr,
+			   const char *buf, size_t count)
+{
+	struct retrode3_slot *slot = dev_get_drvdata(dev);
+	unsigned int value;
+	int err;
+
+	if (!is_selected(slot))
+		return -EACCES;
+
+	err = kstrtouint(buf, 16, &value);
+	if (err < 0)
+		return err;
+
+	if (value > 0x0ffff)
+		return -EINVAL;
+
+	/* leave bus active */
+	drive_word(slot->bus, value);
+
+	return count;
+}
+static DEVICE_ATTR_RW(data16);
+
+static ssize_t raw16_show(struct device *dev, struct device_attribute *attr,
+				char *buf)
+{
+	struct retrode3_slot *slot = dev_get_drvdata(dev);
+	int word;
+
+	word = get_word(slot->bus);
+
+	if (word < 0)
+		return word;
+
+	return sprintf(buf, "%04x\n", word);
+}
+
+static ssize_t raw16_store(struct device *dev,
+			   struct device_attribute *attr,
+			   const char *buf, size_t count)
+{
+	struct retrode3_slot *slot = dev_get_drvdata(dev);
+	unsigned int value;
+	int err;
+
+	err = kstrtouint(buf, 16, &value);
+	if (err < 0)
+		return err;
+
+	if (value > 0x0ffff)
+		return -EINVAL;
+
+	/* leave bus active */
+	set_word(slot->bus, value);
+
+	return count;
+}
+static DEVICE_ATTR_RW(raw16);
+
+static ssize_t control_show(struct device *dev, struct device_attribute *attr,
+				char *buf)
+{
+	struct retrode3_slot *slot = dev_get_drvdata(dev);
+
+	buf[0] = 0;
+
+	sprintf(buf+strlen(buf), "cd=%d\n", gpiod_get_value_cansleep(slot->cd));
+	sprintf(buf+strlen(buf), "ce=%d\n", gpiod_get_value_cansleep(slot->ce));
+	sprintf(buf+strlen(buf), "phi2=%d\n", gpiod_get_value_cansleep(slot->bus->phi2));
+	sprintf(buf+strlen(buf), "rd=%d\n", gpiod_get_value_cansleep(slot->bus->oe));
+	sprintf(buf+strlen(buf), "reset=%d\n", gpiod_get_value_cansleep(slot->bus->reset));
+	sprintf(buf+strlen(buf), "we0=%d\n", gpiod_get_value_cansleep(slot->bus->we->desc[0]));
+	sprintf(buf+strlen(buf), "we8=%d\n", gpiod_get_value_cansleep(slot->bus->we->desc[1]));
+	sprintf(buf+strlen(buf), "time=%d\n", gpiod_get_value_cansleep(slot->bus->time));
+
+	return strlen(buf);
+}
+
+static ssize_t control_store(struct device *dev,
+			   struct device_attribute *attr,
+			   const char *buf, size_t count)
+{
+	struct retrode3_slot *slot = dev_get_drvdata(dev);
+	unsigned int value;
+	int err;
+
+	if (!is_selected(slot))
+		return -EACCES;
+
+#define CONTROL(NAME, GPIO) if (strncmp(buf, #NAME "=", strlen(#NAME "=")) == 0) { \
+		err = kstrtouint(buf+strlen(#NAME "="), 16, &value); \
+		if (err < 0) \
+			return err; \
+		if (value > 1) \
+			return -EINVAL; \
+		gpiod_set_value_cansleep(GPIO, value); \
+		return count; \
+	}
+
+	CONTROL(ce, slot->ce);
+	CONTROL(phi2, slot->bus->phi2);
+	CONTROL(rd, slot->bus->oe);
+	CONTROL(reset, slot->bus->reset);
+	CONTROL(we0, slot->bus->we->desc[0]);
+	CONTROL(we8, slot->bus->we->desc[1]);
+	CONTROL(time, slot->bus->time);
+
+//printk("%s: %s", __func__, buf);
+//#define TEST(NAME) printk("%s: %s len=%d arg=%s cmp=%d", __func__, #NAME "=", strlen(#NAME "="), buf+strlen(#NAME "="), strncmp(buf, #NAME "=", strlen(#NAME "=")));
+//TEST(test);
+	return -EINVAL;
+}
+static DEVICE_ATTR_RW(control);
+
+static int get_channel_index(struct device_attribute *attr)
+{ // name ends in channel number
+	return attr->attr.name[strlen(attr->attr.name) - 1] - '0';
+}
+
+static ssize_t clk_frequency_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct retrode3_slot *slot = dev_get_drvdata(dev);
+	int ch = get_channel_index(attr);
+
+	return sysfs_emit(buf, "%lu\n", get_frequency(slot->bus, ch));
+}
+
+static ssize_t clk_frequency_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct retrode3_slot *slot = dev_get_drvdata(dev);
+	int ch = get_channel_index(attr);
+	unsigned long target_rate;
+	int ret;
+
+	ret = kstrtoul(buf, 10, &target_rate);
+	if (ret)
+		return ret;
+
+	ret = set_frequency(slot->bus, ch, target_rate);
+	if (ret < 0)
+		return ret;
+
+	return count;
+}
+
+static DEVICE_ATTR(clock0, 0644, clk_frequency_show, clk_frequency_store);
+static DEVICE_ATTR(clock1, 0644, clk_frequency_show, clk_frequency_store);
+static DEVICE_ATTR(clock2, 0644, clk_frequency_show, clk_frequency_store);
+
+static struct attribute *retrode3_attrs[] = {
+	&dev_attr_sense.attr,
+	&dev_attr_vcc.attr,
+	&dev_attr_addr.attr,
+	&dev_attr_data8.attr,
+	&dev_attr_data16.attr,
+	&dev_attr_raw16.attr,
+	&dev_attr_control.attr,
+	&dev_attr_clock0.attr,
+	&dev_attr_clock1.attr,
+	&dev_attr_clock2.attr,
+	NULL,
+};
+
+static umode_t retrode3_attr_visibility(struct kobject *kobj, struct attribute *attr, int index) {
+
+	// nur für SNES-Slot!
+	// sollte anders gelöst werden (device-Tree sollte beschreiben wer die Attribute hat)
+
+	if (attr == &dev_attr_clock2.attr) {
+		if (!true) {
+			return 0; // 0 bedeutet: Unsichtbar (wird nicht erstellt)
+		}
+	}
+
+	return attr->mode; // Standard-Zugriffsrechte (z.B. 0444) zurückgeben
+}
+
+static const struct attribute_group retrode3_attr_group = {
+	.attrs = retrode3_attrs,
+	.is_visible = retrode3_attr_visibility,
+};
+
+static const struct attribute_group *retrode3_groups[] = {
+	&retrode3_attr_group,
+	NULL,
+};
+
+static int __init retrode3_module_init(void)
+{
+	int ret;
+
+	ret = alloc_chrdev_region(&retrode3_first, 0, RETRODE3_MINORS, "retrode3");
+	if (ret < 0) {
+		pr_err("failed to allocate device numbers: %d\n", ret);
+		return ret;
+	}
+
+	retrode3_class = class_create("retrode3");
+	if (IS_ERR(retrode3_class)) {
+		ret = PTR_ERR(retrode3_class);
+		pr_err("failed to create class: %d\n", ret);
+		goto err_unregister_chrdev;
+	}
+
+	retrode3_class->dev_groups = retrode3_groups;	// for additional /sys attributes
+
+	ret = platform_driver_register(&retrode3_driver);
+
+	if (ret < 0)
+		goto err_destroy_class;
+
+	pr_info("retrode3 driver registered with major %d\n", MAJOR(retrode3_first));
+
+	return ret;
+
+err_destroy_class:
+	class_destroy(retrode3_class);
+err_unregister_chrdev:
+	unregister_chrdev_region(retrode3_first, RETRODE3_MINORS);
+
+	return ret;
+}
+
+static void __exit retrode3_module_exit(void)
+{
+	/* The platform .remove callback still needs the class and the IDA. */
+	platform_driver_unregister(&retrode3_driver);
+	class_destroy(retrode3_class);
+	unregister_chrdev_region(retrode3_first, RETRODE3_MINORS);
+	ida_destroy(&retrode3_minors);
+}
+
+module_init(retrode3_module_init);
+module_exit(retrode3_module_exit);
+
+MODULE_ALIAS("retrode3");
+
+MODULE_AUTHOR("H. Nikolaus Schaller <hns@goldelico.com>");
+MODULE_DESCRIPTION("retrode 3 bus driver");
+MODULE_LICENSE("GPL v2");
