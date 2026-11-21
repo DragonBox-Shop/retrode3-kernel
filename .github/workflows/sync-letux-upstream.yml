@@ -1,0 +1,34 @@
+name: Mirror Letux upstream kernel
+
+on:
+  schedule:
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mirror-letux-upstream
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out Retrode3 repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 1
+
+      - name: Fetch Letux upstream without executing upstream code
+        run: |
+          git fetch --no-tags https://github.com/goldelico/letux-kernel.git \
+            +refs/heads/letux-current:refs/remotes/letux/letux-current
+          git rev-parse refs/remotes/letux/letux-current
+
+      - name: Update only the dedicated upstream mirror
+        run: |
+          git push origin \
+            +refs/remotes/letux/letux-current:refs/heads/upstream/letux-current
