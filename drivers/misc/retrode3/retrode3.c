@@ -27,6 +27,16 @@ dazu retrode3_device mit Pointer auf den bus
 #include "retrode3_bus.h"
 #include <linux/delay.h>
 
+/*
+ * TEMPORARY BENCH TEST, disabled by default.  This may avoid opposing
+ * GPIO outputs when a passive Retrode2 adapter bridges MD control pins.
+ * High-Z does not electrically isolate a populated second cartridge.
+ */
+static bool legacy_bridge_hiz_test;
+module_param_named(legacy_bridge_hiz_test, legacy_bridge_hiz_test, bool, 0444);
+MODULE_PARM_DESC(legacy_bridge_hiz_test,
+	"BENCH ONLY: MD CE high-Z during SNES/fixed-lane adapter reads, no writes");
+
 /* low level address and data bus access */
 
 // FXIME: get_multiple / set_multiple could be much faster, if supported by device driver
