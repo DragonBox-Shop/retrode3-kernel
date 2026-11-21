@@ -27,6 +27,27 @@ dazu retrode3_device mit Pointer auf den bus
 #include "retrode3_bus.h"
 #include <linux/delay.h>
 
+/*
+ * TEMPORARY BENCH TEST, disabled by default.  The shared CLI can switch
+ * the parameter for a single serialized probe/read and restore its value.
+ * It is intentionally writable by root only; never enable from web input.
+ * This may avoid opposing
+ * GPIO outputs when a passive Retrode2 adapter bridges MD control pins.
+ * High-Z does not electrically isolate a populated second cartridge.
+ */
+static bool legacy_bridge_hiz_test;
+module_param_named(legacy_bridge_hiz_test, legacy_bridge_hiz_test, bool, 0644);
+MODULE_PARM_DESC(legacy_bridge_hiz_test,
+	"BENCH ONLY: MD CE high-Z during SNES/fixed-lane adapter reads, no writes");
+
+/* Enabled by the trusted CLI's scoped hardware profile for SMS reads only.
+ * The kernel still independently restricts addresses, values, slot and 5V.
+ * Runtime switching must happen under the shared userspace cartridge lock. */
+static bool sms_mapper_write_test;
+module_param_named(sms_mapper_write_test, sms_mapper_write_test, bool, 0644);
+MODULE_PARM_DESC(sms_mapper_write_test,
+	"BENCH ONLY: guarded SMS $FFFC-$FFFF mapper writes at 5V with high-Z");
+
 /* low level address and data bus access */
 
 // FXIME: get_multiple / set_multiple could be much faster, if supported by device driver

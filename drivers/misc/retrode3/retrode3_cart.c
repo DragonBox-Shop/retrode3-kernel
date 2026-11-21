@@ -157,10 +157,30 @@ static inline int _set_address(int mode, struct retrode3_slot *slot, uint32_t ad
  *    https://github.com/sanni/cartreader/blob/0b8ac2ec14675ae55952ddf0b4590ba8d2899664/Cart_Reader/NES.ino#L1012
  */
 
+/* Locate the MD connector by compatible, independent of slot ordering. */
+static struct retrode3_slot *legacy_bridge_md_slot(struct retrode3_bus *bus)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(bus->slots); ++i) {
+		struct retrode3_slot *candidate = bus->slots[i];
+
+		if (candidate && of_device_is_compatible(candidate->dev.of_node,
+				"openpandora,retrode3-slot-megadrive"))
+			return candidate;
+	}
+	return NULL;
+}
+
 static ssize_t retrode3_read(struct file *file, char __user *buf,
 			size_t count, loff_t *ppos)
 {
 	struct retrode3_slot *slot = file->private_data;
+	struct gpio_desc *bridge_md_ce = NULL;
+	bool is_md = of_device_is_compatible(slot->dev.of_node,
+			"openpandora,retrode3-slot-megadrive");
+	bool is_snes = of_device_is_compatible(slot->dev.of_node,
+			"openpandora,retrode3-slot-snes");
 	uint32_t addr = *ppos & 0xffffff;	/* max address is 24 bit */
 	uint32_t mode = *ppos >> 24;		/* access mode control */
 	int err;
@@ -175,6 +195,11 @@ static ssize_t retrode3_read(struct file *file, char __user *buf,
 #endif
 
 	read = 0;
+
+	/* This bench mode deliberately blocks normal MD/NES cartridge reads. */
+	if (legacy_bridge_hiz_test &&
+	    !is_snes && !(is_md && retrode3_adapter_mode_is_read(mode)))
+		return -EOPNOTSUPP;
 
 	/*
 	 * Keep adapter access read-only, allowlisted by physical slot, and
@@ -214,10 +239,43 @@ static ssize_t retrode3_read(struct file *file, char __user *buf,
 		err = _set_address(mode, slot, addr);
 		if (err < 0)
 			return err;
-		if (count)
-			select_slot(slot->bus, slot);
+		if (count) {
+			if (legacy_bridge_hiz_test && is_md) {
+				/*
+				 * An empty legacy adapter may bridge RD and CE.
+				 * Keep RD inactive while MD CE changes direction.
+				 */
+				set_bus_bit(slot->bus->oe, 1);
+				mutex_lock(&slot->bus->select_lock);
+				err = gpiod_direction_input(slot->ce);
+				if (err < 0) {
+					mutex_unlock(&slot->bus->select_lock);
+					return err;
+				}
+				bridge_md_ce = slot->ce;
+			} else {
+				select_slot(slot->bus, slot);
+			}
+		}
 	} else if (slot->bus_width != 16 || !slot->fram_mode) {
 		select_slot(slot->bus, slot);	// legacy slot activation
+		if (legacy_bridge_hiz_test && is_snes && count) {
+			struct retrode3_slot *md = legacy_bridge_md_slot(slot->bus);
+
+			if (!md || IS_ERR_OR_NULL(md->ce)) {
+				err = -ENODEV;
+				goto failed;
+			}
+			/*
+			 * Only an EMPTY old adapter may occupy the MD slot.
+			 * High-Z does NOT isolate an inserted cartridge.
+			 */
+			set_bus_bit(slot->bus->oe, 1);
+			err = gpiod_direction_input(md->ce);
+			if (err < 0)
+				goto failed;
+			bridge_md_ce = md->ce;
+		}
 	}
 
 	if (addr + count >= EOF) {
@@ -470,14 +528,150 @@ if ((addr &0xff) == 0) dev_info(&slot->dev, "%s: read NES PPU/CHR %08x %02x\n", 
 	}
 #endif
 
+	if (bridge_md_ce) {
+		int restore;
+
+		/* Stop RD before MD CE is driven inactive again. */
+		set_bus_bit(slot->bus->oe, 1);
+		restore = gpiod_direction_output(bridge_md_ce, 0);
+		if (restore < 0) {
+			dev_err(&slot->dev,
+				"bridge test: MD CE restore failed: %d\n", restore);
+			select_slot(slot->bus, NULL);
+			return restore;
+		}
+	}
 	select_slot(slot->bus, NULL);
 
 	return read;
 
 failed:
+	if (bridge_md_ce) {
+		int restore;
+
+		set_bus_bit(slot->bus->oe, 1);
+		restore = gpiod_direction_output(bridge_md_ce, 0);
+		if (restore < 0)
+			dev_err(&slot->dev,
+				"bridge test: MD CE restore failed: %d\n", restore);
+	}
 	select_slot(slot->bus, NULL);
 
 	return err;
+}
+
+/*
+ * Experimental SMS-0007 mapper-register write.
+ * Invoked ONLY by mode 22 (not the generic MD write path).
+ * A23 is SMS /RD (held HIGH), A22 is SMS /WR (pulsed LOW);
+ * common OE drives the adapter's /CE while MD's own CE is Hi-Z.
+ *
+ * USB/Web autoprobe, other slots, 3.3V, other addresses, and ALL
+ * other writes remain blocked. No cartridge game must be in another slot.
+ * Requires oscilloscope validation before any live experimental use.
+ */
+static ssize_t retrode3_sms_mapper_write(struct retrode3_slot *slot,
+					 const char __user *buf,
+					 size_t count, loff_t *ppos,
+					 u32 addr)
+{
+	struct retrode3_bus *bus = slot->bus;
+	const u32 base = BIT(23) | BIT(22) | BIT(17) | (0xfffcu << 1);
+	struct retrode3_slot *other;
+	u8 value;
+	int err = 0, ret, i;
+	u32 reg;
+
+	if (!legacy_bridge_hiz_test || !sms_mapper_write_test)
+		return -EOPNOTSUPP;
+	if (!of_device_is_compatible(slot->dev.of_node,
+			"openpandora,retrode3-slot-megadrive") ||
+	    slot->bus_width != 16 || slot->fram_mode || count != 1 ||
+	    (addr & ~6u) != base || (addr & 1))
+		return -EOPNOTSUPP;
+	reg = (addr & 6u) >> 1;
+	if (copy_from_user(&value, buf, 1))
+		return -EFAULT;
+
+	/* Sanni's initialization: SRAM off, pages 0/1 fixed, page 2 banked. */
+	if ((reg == 0 && value != 0) ||
+	    (reg == 1 && value != 0) ||
+	    (reg == 2 && value != 1) ||
+	    (reg == 3 && value >= 64))
+		return -EPERM;
+
+	if (get_slot_power_mV(slot) != 5000)
+		return -EPERM;
+	ret = gpiod_get_value(slot->cd);
+	if (ret <= 0)
+		return ret < 0 ? ret : -ENODEV;
+
+	/* Never enable writes with another cartridge fitted. */
+	for (i = 0; i < ARRAY_SIZE(bus->slots); i++) {
+		other = bus->slots[i];
+		if (!other || other == slot || other->is_controller ||
+		    IS_ERR_OR_NULL(other->cd))
+			continue;
+		ret = gpiod_get_value(other->cd);
+		if (ret != 0)
+			return ret < 0 ? ret : -EBUSY;
+	}
+
+	mutex_lock(&bus->select_lock);
+	/* Control lines idle, data inputs and MD CE inactive before setup. */
+	set_bus_bit(bus->oe, 1);
+	gpiod_set_value(bus->we->desc[0], 0);
+	gpiod_set_value(bus->we->desc[1], 0);
+	gpiod_set_value(bus->time, 0);
+	end_drive_word(bus);
+
+	for (i = 0; i < ARRAY_SIZE(bus->slots); i++) {
+		other = bus->slots[i];
+		if (other && !other->is_controller && !IS_ERR_OR_NULL(other->ce))
+			gpiod_set_value(other->ce, 0);
+	}
+
+	err = _set_address(RETRODE3_ADAPTER_SMS_MD_MAPPER_WRITE, slot, addr);
+	if (err < 0)
+		goto restore;
+
+	err = gpiod_direction_input(slot->ce);
+	if (err < 0)
+		goto restore;
+
+	/* A17 high prevents RAM selection; A23 high keeps /RD inactive. */
+	for (i = 0; i < 8; i++) {
+		err = gpiod_direction_output(bus->datas->desc[i],
+						 (value >> i) & 1);
+		if (err < 0)
+			goto restore;
+	}
+	udelay(1);
+	/* Apply /WR only while /CE is inactive. */
+	err = _set_address(RETRODE3_ADAPTER_SMS_MD_MAPPER_WRITE,
+			   slot, addr & ~BIT(22));
+	if (err < 0)
+		goto restore;
+	udelay(1);
+	set_bus_bit(bus->oe, 0);	/* Adapter /CE asserted */
+	udelay(1);
+	set_bus_bit(bus->oe, 1);	/* Adapter /CE released */
+
+restore:
+	/* Never restore data/MD CE until RD is inactive and /WR is high. */
+	set_bus_bit(bus->oe, 1);
+	ret = _set_address(RETRODE3_ADAPTER_SMS_MD_MAPPER_WRITE, slot, addr);
+	if (ret < 0 && err >= 0)
+		err = ret;
+	end_drive_word(bus);
+	ret = gpiod_direction_output(slot->ce, 0);
+	if (ret < 0 && err >= 0)
+		err = ret;
+	mutex_unlock(&bus->select_lock);
+	if (err < 0)
+		return err;
+	*ppos += 1;
+	return 1;
 }
 
 static ssize_t retrode3_write(struct file *file, const char __user *buf,
@@ -493,6 +687,14 @@ static ssize_t retrode3_write(struct file *file, const char __user *buf,
 // dev_info(&slot->dev, "%s: ppos=%08llx (fram=%d mode=%d addr=%x) count=%ld\n", __func__, *ppos, slot->fram_mode, mode, addr, count);
 
 	written = 0;
+
+	/* Independent narrowly guarded mapper mode; no other writes enabled. */
+	if (mode == RETRODE3_ADAPTER_SMS_MD_MAPPER_WRITE)
+		return retrode3_sms_mapper_write(slot, buf, count, ppos, addr);
+
+	/* No cart writes are permitted in the bench experiment. */
+	if (legacy_bridge_hiz_test)
+		return -EOPNOTSUPP;
 
 	/* Adapter lane modes must never perform a write cycle. */
 	if (retrode3_adapter_mode_is_read(mode))
