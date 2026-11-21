@@ -157,10 +157,30 @@ static inline int _set_address(int mode, struct retrode3_slot *slot, uint32_t ad
  *    https://github.com/sanni/cartreader/blob/0b8ac2ec14675ae55952ddf0b4590ba8d2899664/Cart_Reader/NES.ino#L1012
  */
 
+/* Locate the MD slot by compatible, not its enumeration order. */
+static struct retrode3_slot *legacy_bridge_md_slot(struct retrode3_bus *bus)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(bus->slots); ++i) {
+		struct retrode3_slot *candidate = bus->slots[i];
+
+		if (candidate && of_device_is_compatible(candidate->dev.of_node,
+				"openpandora,retrode3-slot-megadrive"))
+			return candidate;
+	}
+	return NULL;
+}
+
 static ssize_t retrode3_read(struct file *file, char __user *buf,
 			size_t count, loff_t *ppos)
 {
 	struct retrode3_slot *slot = file->private_data;
+	struct gpio_desc *bridge_md_ce = NULL;
+	bool is_md = of_device_is_compatible(slot->dev.of_node,
+			"openpandora,retrode3-slot-megadrive");
+	bool is_snes = of_device_is_compatible(slot->dev.of_node,
+			"openpandora,retrode3-slot-snes");
 	uint32_t addr = *ppos & 0xffffff;	/* max address is 24 bit */
 	uint32_t mode = *ppos >> 24;		/* access mode control */
 	int err;
@@ -175,6 +195,11 @@ static ssize_t retrode3_read(struct file *file, char __user *buf,
 #endif
 
 	read = 0;
+
+	/* Restrict the bench experiment to SNES and fixed-lane MD adapter reads. */
+	if (legacy_bridge_hiz_test &&
+	    !is_snes && !(is_md && retrode3_adapter_mode_is_read(mode)))
+		return -EOPNOTSUPP;
 
 	/*
 	 * Keep adapter access read-only, allowlisted by physical slot, and
@@ -214,10 +239,45 @@ static ssize_t retrode3_read(struct file *file, char __user *buf,
 		err = _set_address(mode, slot, addr);
 		if (err < 0)
 			return err;
-		if (count)
-			select_slot(slot->bus, slot);
+		if (count) {
+			if (legacy_bridge_hiz_test && is_md) {
+				/*
+				 * The adapter directly ties MD CE and RD. RD is inactive
+				 * now; do not select MD by driving its own CE output.
+				 * RD's read pulse will also select the adapter.
+				 */
+				set_bus_bit(slot->bus->oe, 1);
+				mutex_lock(&slot->bus->select_lock);
+				err = gpiod_direction_input(slot->ce);
+				if (err < 0) {
+					mutex_unlock(&slot->bus->select_lock);
+					return err;
+				}
+				bridge_md_ce = slot->ce;
+			} else {
+				select_slot(slot->bus, slot);
+			}
+		}
 	} else if (slot->bus_width != 16 || !slot->fram_mode) {
 		select_slot(slot->bus, slot);	// legacy slot activation
+		if (legacy_bridge_hiz_test && is_snes && count) {
+			struct retrode3_slot *md = legacy_bridge_md_slot(slot->bus);
+
+			if (!md || IS_ERR_OR_NULL(md->ce)) {
+				err = -ENODEV;
+				goto failed;
+			}
+			/*
+			 * With an EMPTY legacy adapter on MD, tri-state MD CE
+			 * so the SNES RD pulse cannot oppose the MD CE output.
+			 * An inserted cartridge is NOT electrically isolated!
+			 */
+			set_bus_bit(slot->bus->oe, 1);
+			err = gpiod_direction_input(md->ce);
+			if (err < 0)
+				goto failed;
+			bridge_md_ce = md->ce;
+		}
 	}
 
 	if (addr + count >= EOF) {
@@ -470,11 +530,33 @@ if ((addr &0xff) == 0) dev_info(&slot->dev, "%s: read NES PPU/CHR %08x %02x\n", 
 	}
 #endif
 
+	if (bridge_md_ce) {
+		int restore;
+
+		/* RD inactive before restoring MD CE output/inactive.
+		 * Keep the selection mutex held through this transition.
+		 */
+		set_bus_bit(slot->bus->oe, 1);
+		restore = gpiod_direction_output(bridge_md_ce, 0);
+		if (restore < 0) {
+			dev_err(&slot->dev, "bridge test: MD CE restore failed: %d\n", restore);
+			select_slot(slot->bus, NULL);
+			return restore;
+		}
+	}
 	select_slot(slot->bus, NULL);
 
 	return read;
 
 failed:
+	if (bridge_md_ce) {
+		int restore;
+
+		set_bus_bit(slot->bus->oe, 1);
+		restore = gpiod_direction_output(bridge_md_ce, 0);
+		if (restore < 0)
+			dev_err(&slot->dev, "bridge test: MD CE restore failed: %d\n", restore);
+	}
 	select_slot(slot->bus, NULL);
 
 	return err;
@@ -489,6 +571,10 @@ static ssize_t retrode3_write(struct file *file, const char __user *buf,
 	ssize_t written, sz;
 	unsigned long copied;
 	int err;
+
+	/* No cartridge writes in the bridge experiment, on any slot. */
+	if (legacy_bridge_hiz_test)
+		return -EOPNOTSUPP;
 
 // dev_info(&slot->dev, "%s: ppos=%08llx (fram=%d mode=%d addr=%x) count=%ld\n", __func__, *ppos, slot->fram_mode, mode, addr, count);
 

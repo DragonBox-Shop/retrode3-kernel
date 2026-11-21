@@ -26,6 +26,15 @@ dazu retrode3_device mit Pointer auf den bus
 
 #include "retrode3_bus.h"
 
+/*
+ * TEMPORARY BENCH TEST for Retrode2 adapters that tie MD /CE to RD.
+ * Disabled by default; GPIOs cannot isolate two populated cartridges.
+ */
+static bool legacy_bridge_hiz_test;
+module_param_named(legacy_bridge_hiz_test, legacy_bridge_hiz_test, bool, 0444);
+MODULE_PARM_DESC(legacy_bridge_hiz_test,
+	"BENCH ONLY: MD CE high-Z during SNES/fixed-lane adapter reads, no writes");
+
 /* low level address and data bus access */
 
 // FXIME: get_multiple / set_multiple could be much faster, if supported by device driver
