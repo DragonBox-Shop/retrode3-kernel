@@ -37,6 +37,12 @@ module_param_named(legacy_bridge_hiz_test, legacy_bridge_hiz_test, bool, 0444);
 MODULE_PARM_DESC(legacy_bridge_hiz_test,
 	"BENCH ONLY: MD CE high-Z during SNES/fixed-lane adapter reads, no writes");
 
+/* Never enabled automatically: only the Sega SMS mapper's four registers. */
+static bool sms_mapper_write_test;
+module_param_named(sms_mapper_write_test, sms_mapper_write_test, bool, 0444);
+MODULE_PARM_DESC(sms_mapper_write_test,
+	"BENCH ONLY: guarded SMS $FFFC-$FFFF mapper writes at 5V with high-Z");
+
 /* low level address and data bus access */
 
 // FXIME: get_multiple / set_multiple could be much faster, if supported by device driver

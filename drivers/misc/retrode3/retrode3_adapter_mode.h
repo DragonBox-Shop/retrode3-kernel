@@ -9,6 +9,11 @@
  */
 #define RETRODE3_ADAPTER_READ_D0_D7   20U
 #define RETRODE3_ADAPTER_READ_D8_D15 21U
+/*
+ * Dedicated, isolated SMS-0007 mapper-register transport.
+ * NOT a generic cartridge write operation.
+ */
+#define RETRODE3_ADAPTER_SMS_MD_MAPPER_WRITE 22U
 
 static inline int retrode3_adapter_mode_is_read(unsigned int mode)
 {

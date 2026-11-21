@@ -560,6 +560,120 @@ failed:
 	return err;
 }
 
+/*
+ * Experimental SMS-0007 mapper-register write.
+ * Invoked ONLY by mode 22 (not the generic MD write path).
+ * A23 is SMS /RD (held HIGH), A22 is SMS /WR (pulsed LOW);
+ * common OE drives the adapter's /CE while MD's own CE is Hi-Z.
+ *
+ * USB/Web autoprobe, other slots, 3.3V, other addresses, and ALL
+ * other writes remain blocked. No cartridge game must be in another slot.
+ * Requires oscilloscope validation before any live experimental use.
+ */
+static ssize_t retrode3_sms_mapper_write(struct retrode3_slot *slot,
+					 const char __user *buf,
+					 size_t count, loff_t *ppos,
+					 u32 addr)
+{
+	struct retrode3_bus *bus = slot->bus;
+	const u32 base = BIT(23) | BIT(22) | BIT(17) | (0xfffcu << 1);
+	struct retrode3_slot *other;
+	u8 value;
+	int err = 0, ret, i;
+	u32 reg;
+
+	if (!legacy_bridge_hiz_test || !sms_mapper_write_test)
+		return -EOPNOTSUPP;
+	if (!of_device_is_compatible(slot->dev.of_node,
+			"openpandora,retrode3-slot-megadrive") ||
+	    slot->bus_width != 16 || slot->fram_mode || count != 1 ||
+	    (addr & ~6u) != base || (addr & 1))
+		return -EOPNOTSUPP;
+	reg = (addr & 6u) >> 1;
+	if (copy_from_user(&value, buf, 1))
+		return -EFAULT;
+
+	/* Sanni's initialization: SRAM off, pages 0/1 fixed, page 2 banked. */
+	if ((reg == 0 && value != 0) ||
+	    (reg == 1 && value != 0) ||
+	    (reg == 2 && value != 1) ||
+	    (reg == 3 && value >= 64))
+		return -EPERM;
+
+	if (get_slot_power_mV(slot) != 5000)
+		return -EPERM;
+	ret = gpiod_get_value(slot->cd);
+	if (ret <= 0)
+		return ret < 0 ? ret : -ENODEV;
+
+	/* Never enable writes with another cartridge fitted. */
+	for (i = 0; i < ARRAY_SIZE(bus->slots); i++) {
+		other = bus->slots[i];
+		if (!other || other == slot || other->is_controller ||
+		    IS_ERR_OR_NULL(other->cd))
+			continue;
+		ret = gpiod_get_value(other->cd);
+		if (ret != 0)
+			return ret < 0 ? ret : -EBUSY;
+	}
+
+	mutex_lock(&bus->select_lock);
+	/* Control lines idle, data inputs and MD CE inactive before setup. */
+	set_bus_bit(bus->oe, 1);
+	gpiod_set_value(bus->we->desc[0], 0);
+	gpiod_set_value(bus->we->desc[1], 0);
+	gpiod_set_value(bus->time, 0);
+	end_drive_word(bus);
+
+	for (i = 0; i < ARRAY_SIZE(bus->slots); i++) {
+		other = bus->slots[i];
+		if (other && !other->is_controller && !IS_ERR_OR_NULL(other->ce))
+			gpiod_set_value(other->ce, 0);
+	}
+
+	err = _set_address(RETRODE3_ADAPTER_SMS_MD_MAPPER_WRITE, slot, addr);
+	if (err < 0)
+		goto restore;
+
+	err = gpiod_direction_input(slot->ce);
+	if (err < 0)
+		goto restore;
+
+	/* A17 high prevents RAM selection; A23 high keeps /RD inactive. */
+	for (i = 0; i < 8; i++) {
+		err = gpiod_direction_output(bus->datas->desc[i],
+						 (value >> i) & 1);
+		if (err < 0)
+			goto restore;
+	}
+	udelay(1);
+	/* Apply /WR only while /CE is inactive. */
+	err = _set_address(RETRODE3_ADAPTER_SMS_MD_MAPPER_WRITE,
+			   slot, addr & ~BIT(22));
+	if (err < 0)
+		goto restore;
+	udelay(1);
+	set_bus_bit(bus->oe, 0);	/* Adapter /CE asserted */
+	udelay(1);
+	set_bus_bit(bus->oe, 1);	/* Adapter /CE released */
+
+restore:
+	/* Never restore data/MD CE until RD is inactive and /WR is high. */
+	set_bus_bit(bus->oe, 1);
+	ret = _set_address(RETRODE3_ADAPTER_SMS_MD_MAPPER_WRITE, slot, addr);
+	if (ret < 0 && err >= 0)
+		err = ret;
+	end_drive_word(bus);
+	ret = gpiod_direction_output(slot->ce, 0);
+	if (ret < 0 && err >= 0)
+		err = ret;
+	mutex_unlock(&bus->select_lock);
+	if (err < 0)
+		return err;
+	*ppos += 1;
+	return 1;
+}
+
 static ssize_t retrode3_write(struct file *file, const char __user *buf,
 			 size_t count, loff_t *ppos)
 {
@@ -573,6 +687,10 @@ static ssize_t retrode3_write(struct file *file, const char __user *buf,
 // dev_info(&slot->dev, "%s: ppos=%08llx (fram=%d mode=%d addr=%x) count=%ld\n", __func__, *ppos, slot->fram_mode, mode, addr, count);
 
 	written = 0;
+
+	/* Independent narrowly guarded mapper mode; no other writes enabled. */
+	if (mode == RETRODE3_ADAPTER_SMS_MD_MAPPER_WRITE)
+		return retrode3_sms_mapper_write(slot, buf, count, ppos, addr);
 
 	/* No cart writes are permitted in the bench experiment. */
 	if (legacy_bridge_hiz_test)
