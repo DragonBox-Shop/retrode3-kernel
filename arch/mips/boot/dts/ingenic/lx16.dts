@@ -11,6 +11,14 @@
 #define PWM_LED		0	// 1 = use PWM on led0 and led1
 #define SPI_BITBANG	0	// 1 = debug using bitbang gpio
 
+/* Retrode3 builds select APPLICATION in lx16-retrode-*.dts. */
+#ifdef APPLICATION
+#if APPLICATION <= 293
+#undef SPI_BITBANG
+#define SPI_BITBANG 1
+#endif
+#endif
+
 /* choose one board revision */
 #if LX16_REV == 1
 #include "lx16-v0.1.dtsi"
@@ -25,4 +33,8 @@
 #include "lx16-wireless-qcom.dtsi"
 #elif LX16_W == 2
 #include "lx16-wireless-esp32.dtsi"
+#endif
+
+#ifdef APPLICATION
+#include "lx16+retrode3.dtsi"
 #endif
