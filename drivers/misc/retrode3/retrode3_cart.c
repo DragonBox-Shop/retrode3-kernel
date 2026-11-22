@@ -582,6 +582,7 @@ static ssize_t retrode3_sms_mapper_write(struct retrode3_slot *slot,
 	u8 value;
 	int err = 0, ret, i;
 	u32 reg;
+	const char *failed_stage = "address_setup";
 
 	if (!legacy_bridge_hiz_test || !sms_mapper_write_test)
 		return -EOPNOTSUPP;
@@ -604,8 +605,11 @@ static ssize_t retrode3_sms_mapper_write(struct retrode3_slot *slot,
 	if (get_slot_power_mV(slot) != 5000)
 		return -EPERM;
 	ret = gpiod_get_value(slot->cd);
-	if (ret <= 0)
+	if (ret <= 0) {
+		if (ret < 0)
+			dev_err(&slot->dev, "SMS mapper: cart detect GPIO error %d\n", ret);
 		return ret < 0 ? ret : -ENODEV;
+	}
 
 	mutex_lock(&bus->select_lock);
 	/* Control lines idle, data inputs and MD CE inactive before setup. */
@@ -625,19 +629,25 @@ static ssize_t retrode3_sms_mapper_write(struct retrode3_slot *slot,
 	if (err < 0)
 		goto restore;
 
+	failed_stage = "md_ce_high_z";
 	err = gpiod_direction_input(slot->ce);
 	if (err < 0)
 		goto restore;
 
 	/* A17 high prevents RAM selection; A23 high keeps /RD inactive. */
+	failed_stage = "data_drive";
 	for (i = 0; i < 8; i++) {
 		err = gpiod_direction_output(bus->datas->desc[i],
 						 (value >> i) & 1);
-		if (err < 0)
+		if (err < 0) {
+			dev_err(&slot->dev,
+				"SMS mapper: data GPIO %d direction error %d\n", i, err);
 			goto restore;
+		}
 	}
 	udelay(1);
 	/* Apply /WR only while /CE is inactive. */
+	failed_stage = "wr_address_setup";
 	err = _set_address(RETRODE3_ADAPTER_SMS_MD_MAPPER_WRITE,
 			   slot, addr & ~BIT(22));
 	if (err < 0)
@@ -651,15 +661,28 @@ restore:
 	/* Never restore data/MD CE until RD is inactive and /WR is high. */
 	set_bus_bit(bus->oe, 1);
 	ret = _set_address(RETRODE3_ADAPTER_SMS_MD_MAPPER_WRITE, slot, addr);
-	if (ret < 0 && err >= 0)
-		err = ret;
+	if (ret < 0) {
+		dev_err(&slot->dev, "SMS mapper: address restore error %d\n", ret);
+		if (err >= 0) {
+			err = ret;
+			failed_stage = "address_restore";
+		}
+	}
 	end_drive_word(bus);
 	ret = gpiod_direction_output(slot->ce, 0);
-	if (ret < 0 && err >= 0)
-		err = ret;
+	if (ret < 0) {
+		dev_err(&slot->dev, "SMS mapper: MD CE restore error %d\n", ret);
+		if (err >= 0) {
+			err = ret;
+			failed_stage = "md_ce_restore";
+		}
+	}
 	mutex_unlock(&bus->select_lock);
-	if (err < 0)
+	if (err < 0) {
+		dev_err(&slot->dev, "SMS mapper: step=%s reg=%u error=%d\n",
+			failed_stage, reg, err);
 		return err;
+	}
 	*ppos += 1;
 	return 1;
 }
