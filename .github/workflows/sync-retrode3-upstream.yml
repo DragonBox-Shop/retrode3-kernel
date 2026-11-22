@@ -66,9 +66,9 @@ jobs:
               {
                 echo '# Nikolaus Retrode3: neue relevante Quellaenderungen'
                 echo
-                echo "Quelle: `project-retrode3-v2`"
-                echo "Alter Mirror: `$previous`"
-                echo "Neuer Mirror: `$now`"
+                printf 'Quelle: `project-retrode3-v2`\n'
+                printf 'Alter Mirror: `%s`\n' "$previous"
+                printf 'Neuer Mirror: `%s`\n' "$now"
                 echo
                 echo "Vergleich: https://github.com/$GITHUB_REPOSITORY/compare/$previous...$now"
                 echo
