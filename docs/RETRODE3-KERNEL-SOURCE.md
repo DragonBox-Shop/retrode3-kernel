@@ -50,6 +50,29 @@ that default to `master`, the same workflow MUST be included in
 `master`. The mirror branch appears only after the first successful
 run. The GitHub Actions job only fetches Letux and pushes the mirror ref.
 
+## Verified Retrode3 2.9.5 DTB reproduction (2026-11-22)
+
+The 2.9.5 Device Tree has been independently built from this integration
+branch with the installed device's `/boot/FULLCONFIG` as starting
+configuration (`make ARCH=mips olddefconfig` followed by
+`make ARCH=mips dtbs`, using the local MIPS cross-toolchain).
+The resulting `arch/mips/boot/dts/ingenic/lx16-retrode-2.9.5.dtb`
+was compared with the original
+`/boot/ingenic/lx16-retrode-2.9.5.dtb` copied from the Retrode3's
+`linux-image-letux-retrode3` package version
+`7.3-rc5-20261001095807`.
+
+Both files have SHA-256:
+
+```
+4f75917c3c63501f25de6f24a8c5434caa06b33d1ae62bfad39c7abe57b79425
+```
+
+`cmp` confirms byte-for-byte identity. This verifies the 2.9.5 DTB
+output, **not** the exact original source revision, the other hardware
+revisions, the entire kernel image, or its modules. These require
+separate release verification.
+
 ## Reproducing the Oct 2026 kernel configuration
 
 On a Retrode3 with Nikolaus's installed Debian image:
