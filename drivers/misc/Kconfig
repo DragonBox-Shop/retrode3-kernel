@@ -4,6 +4,7 @@
 #
 
 menu "Misc devices"
+source "drivers/misc/retrode3/Kconfig"
 
 config SENSORS_LIS3LV02D
 	tristate
