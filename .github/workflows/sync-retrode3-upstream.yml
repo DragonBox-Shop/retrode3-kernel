@@ -1,4 +1,4 @@
-name: Mirror Nikolaus Retrode3 sources and flag updates
+name: Mirror Letux Retrode3 sources and flag updates
 
 on:
   schedule:
@@ -23,7 +23,7 @@ jobs:
           persist-credentials: true
           fetch-depth: 1
 
-      - name: Compare Nikolaus board sources and update isolated mirror
+      - name: Compare Letux board sources and update isolated mirror
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -39,9 +39,9 @@ jobs:
           now=$(git rev-parse refs/remotes/source/retrode3)
           previous=
           if git ls-remote --exit-code --heads origin \
-              refs/heads/upstream/nikolaus-retrode3 >/dev/null 2>&1; then
+              refs/heads/upstream/letux-retrode3 >/dev/null 2>&1; then
             git fetch --no-tags --filter=blob:none --depth=256 origin \
-              '+refs/heads/upstream/nikolaus-retrode3:refs/remotes/mirror/retrode3'
+              '+refs/heads/upstream/letux-retrode3:refs/remotes/mirror/retrode3'
             previous=$(git rev-parse refs/remotes/mirror/retrode3)
           fi
 
@@ -64,7 +64,7 @@ jobs:
             if ! git diff --quiet "$previous" "$now" -- "${paths[@]}"; then
               report="$RUNNER_TEMP/retrode3-upstream-review.md"
               {
-                echo '# Nikolaus Retrode3: neue relevante Quellaenderungen'
+                echo '# Letux Retrode3: neue relevante Quellaenderungen'
                 echo
                 printf 'Quelle: `project-retrode3-v2`\n'
                 printf 'Alter Mirror: `%s`\n' "$previous"
@@ -115,17 +115,17 @@ jobs:
           elif [ -z "$previous" ]; then
             echo 'Initialer Mirror: keine rueckwirkenden Review-Issues.' >> "$GITHUB_STEP_SUMMARY"
           else
-            echo 'Nikolaus Retrode3: keine neuen Commits.' >> "$GITHUB_STEP_SUMMARY"
+            echo 'Letux Retrode3: keine neuen Commits.' >> "$GITHUB_STEP_SUMMARY"
           fi
 
           # Advance ONLY the dedicated mirror. A lease prevents a stale run
           # from overwriting a newer mirror update. No merges into releases.
           if [ -n "$previous" ]; then
             git push \
-              --force-with-lease="refs/heads/upstream/nikolaus-retrode3:$previous" \
-              origin '+refs/remotes/source/retrode3:refs/heads/upstream/nikolaus-retrode3'
+              --force-with-lease="refs/heads/upstream/letux-retrode3:$previous" \
+              origin '+refs/remotes/source/retrode3:refs/heads/upstream/letux-retrode3'
           else
             git push \
-              --force-with-lease='refs/heads/upstream/nikolaus-retrode3:' \
-              origin '+refs/remotes/source/retrode3:refs/heads/upstream/nikolaus-retrode3'
+              --force-with-lease='refs/heads/upstream/letux-retrode3:' \
+              origin '+refs/remotes/source/retrode3:refs/heads/upstream/letux-retrode3'
           fi
