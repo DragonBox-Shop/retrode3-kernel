@@ -187,21 +187,27 @@ static ssize_t retrode3_gbx_read(struct retrode3_slot *slot,
 		size_t i, n = min_t(size_t, sizeof(block), count - completed);
 
 		retrode3_cart_led_activity(slot);
-		for (i = 0; i < n; ++i) {
-			if (!gba)
+		for (i = 0; i < n; ) {
+			if (!gba) {
 				err = retrode3_gbx_gb_read8(bus,
 							   (u16)(full_addr + completed + i));
-			else {
+				if (err < 0)
+					goto out;
+				block[i++] = (u8)err;
+			} else {
 				u32 a = full_addr + completed + i;
 				int word = retrode3_gbx_gba_read16(bus, a & ~1U);
 
-				err = word < 0 ? word :
-					((a & 1) ? ((word >> 8) & 0xff) :
-						    (word & 0xff));
+				if (word < 0) {
+					err = word;
+					goto out;
+				}
+				block[i++] = (a & 1) ? (u8)(word >> 8) :
+							  (u8)word;
+				/* One physical GBA cycle returns both bytes. */
+				if (!(a & 1) && i < n)
+					block[i++] = (u8)(word >> 8);
 			}
-			if (err < 0)
-				goto out;
-			block[i] = (u8)err;
 		}
 		if (copy_to_user(buf + completed, block, n)) {
 			err = -EFAULT;
