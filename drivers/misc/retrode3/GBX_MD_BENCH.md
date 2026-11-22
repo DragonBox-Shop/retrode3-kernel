@@ -1,15 +1,19 @@
 # Retrode2 GBx-0011 MD-slot kernel bench (Letux 7.3)
 
 Status: **source-only**, hardware build and electrical/ROM tests pending.
-Branch: \`feature/gbx-md-read-7.3\` on \`DragonBox-Shop/retrode3-kernel\`.
-Stage-1 portable reader is in \`retrode3-oscr\` branch
-\`feature/gbx-retrode2-md-transport\`.
+Branch: `feature/gbx-md-read-7.3` on `DragonBox-Shop/retrode3-kernel`.
+Stage-1 portable reader is in `retrode3-oscr` branch
+`feature/gbx-retrode2-md-transport`.
 
 ## Intended physical test
 
 Use an **empty MD connector when loading the experimental kernel module**.
-Before inserting the GBx-0011 adapter, set the root-only module parameter
-\`gbx_md_test=1\`, then insert the adapter/cartridge to test. The kernel
+With no GB/GBC/GBA cartridge inserted, run the matching OSCR tool
+`python3 tools/gbx-md-hwtest.py arm`. It sets `gbx_md_test=1` and
+performs a single empty GBA-mode bus read, which makes MD A19 high-Z.
+**Setting the module parameter alone does not reconfigure A19.**
+Only after this arm step insert the cartridge and run the selected header
+probe with `python3 tools/gbx-md-hwtest.py gb` or `gba`. The kernel
 blocks ALL ordinary slot reads and writes while armed; after the first
 GBx operation it also blocks them if the parameter is subsequently reset.
 Do not run another core until the GBx adapter is removed and the module
@@ -24,8 +28,8 @@ dynamic plugins, just as for SMS-MD. No automatic 5-V probes.
 
 ## Device ABI (private experimental offsets)
 
-\`pread\` on \`/dev/slot-md\` with 64-bit offset
-\`((uint64_t)mode << 24) | byte_offset\`:
+`pread` on `/dev/slot-md` with 64-bit offset
+`((uint64_t)mode << 24) | byte_offset`:
 
 | Mode | Meaning | Byte offsets |
 |---|---|---|
@@ -34,7 +38,7 @@ dynamic plugins, just as for SMS-MD. No automatic 5-V probes.
 | 25 | GBA ROM read, high window | 0..0xffffff (physical +0x1000000) |
 
 The two GBA windows cover 32 MiB. Returned GBA bytes use little-endian
-word order, matching the stage-1 portable \`gba_read16(byte_addr)\`.
+word order, matching the stage-1 portable `gba_read16(byte_addr)`.
 
 In these modes, MD D0..15 carry GB addresses or multiplexed GBA
 addresses/data; MD A8..15 are GB data inputs or GBA upper address
@@ -49,9 +53,9 @@ After removing the adapter, reload the original module for normal use.
 
 **Kernel build (Arch / Podman):** use the prepared Letux 7.3 MIPS tree
 with matching .config and Module.symvers, bind-mounted into
-\`localhost/retrode3-mips-builder:latest\`. Build ONLY
-\`make ARCH=mips CROSS_COMPILE=mipsel-linux-gnu- M=drivers/misc/retrode3 modules\`.
-Check vermagic against \`7.3.0-rc5-letux-mips-retrode3+\`. Do not replace
+`localhost/retrode3-mips-builder:latest`. Build ONLY
+`make ARCH=mips CROSS_COMPILE=mipsel-linux-gnu- M=drivers/misc/retrode3 modules`.
+Check vermagic against `7.3.0-rc5-letux-mips-retrode3+`. Do not replace
 the installed original before testing the module copy.
 
 The stage-1 tool in the OSCR feature branch is the target for header
