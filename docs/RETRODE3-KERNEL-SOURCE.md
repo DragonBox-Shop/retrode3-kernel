@@ -39,10 +39,12 @@ until that regression and the full DTB have been checked.
 * `feature/*` and `integration/*`: isolated experimental work.
 * `archive/*`: retained historical references.
 
-The daily upstream workflow lives on this repository's default branch
-`project-retrode3-v2`:
+The daily upstream workflow is maintained in
 `.github/workflows/sync-letux-upstream.yml`.
-The mirror branch appears only after that workflow's first successful
+GitHub executes scheduled workflows from the repository default
+branch only (currently `project-retrode3-v2`). Before switching
+that default to `master`, the same workflow MUST be included in
+`master`. The mirror branch appears only after the first successful
 run. The GitHub Actions job only fetches Letux and pushes the mirror ref.
 
 ## Reproducing the Oct 2026 kernel configuration
