@@ -53,7 +53,7 @@ against the physical adapter/host wiring.
 
 Before this correction, GPIO A16 was configured as an OUTPUT; if it
 carries GB D7 this is a potential electrical conflict. The updated
-bench **leaves A16 INPUT for GB** and samples nine-to-sixteen; GBA
+bench **leaves A16 INPUT for GB** and samples nine-to-sixteen; after **every** GBx read (including the empty-bus arm step) it releases all shared GPIOs A8..A16 to INPUT/Hi-Z before cartridge insertion or removal. GBA
 upper-address bits are tentatively driven on nine-to-sixteen as the
 same shared connector pins. Neither result is considered validated
 until a newly compiled test module produces a **valid GB header**
