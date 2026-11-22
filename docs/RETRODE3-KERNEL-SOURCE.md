@@ -169,6 +169,55 @@ kernel image with the October release. Do not replace an installed kernel or mod
 without backups and a tested rollback path. Keep this branch separate
 from release branches until hardware approval.
 
+## First hardware boot of independently built kernel (2026-11-22)
+
+**Successful:** the developer replaced only `/boot/uImage` on a
+removable Retrode3 SD card and booted the Retrode3 2.9.5 using the
+independently built integration kernel. The existing installed DTB,
+root filesystem and kernel modules were retained for this initial boot;
+the newly built `.ko` files have **not** yet been established as tested
+on-device.
+
+Observed output:
+
+```text
+Linux openpandora-retrode-2-9-5 7.3.0-rc5-letux-mips-retrode3+ #5 PREEMPT Sun Nov 22 02:20:59 UTC 2026 mips GNU/Linux
+Linux version 7.3.0-rc5-letux-mips-retrode3+ (michi@06e7fc4abe46) (mipsel-linux-gcc.br_real (Buildroot 2018.11-rc2-00003-ga0787e9) 8.2.0, GNU ld (GNU Binutils) 2.31.1) #5 PREEMPT Sun Nov 22 02:20:59 UTC 2026
+retrode3: loading out-of-tree module taints kernel.
+retrode3_probe: time=82812670
+retrode3 gamecontroller: add game controller 0
+retrode3 gamecontroller: add game controller 1
+retrode3 gamecontroller: add game controller 2
+retrode3 gamecontroller: add game controller 3
+retrode3 driver registered with major 245
+```
+
+`lsmod` shows `retrode3 45056 0`. The driver initialized and
+registered all four gamecontroller inputs. This is a **real hardware
+boot milestone**, not evidence yet that all cartridge reads, slot
+power/sense, SRAM access, USB peripheral functions, or the separately
+built replacement module have been exercised.
+
+The boot log also contained `esp_hosted_ng_sdio` boot-event processing
+failure (`tag=1`) and probe error `-22`, consistent with the
+separately tracked ESP-Hosted firmware compatibility problem. It also
+reported missing `regulatory.db` and optional DT supply-property
+lookups. These are distinct from the successful kernel boot and
+Retrode3-driver initialization; resolve and verify separately.
+
+Bootloader evidence from the installed SD card includes:
+
+```text
+bootfile=/uImage
+bootcmd=fatload mmc 0 ${bootaddr} ${bootfile}; if fatload mmc 0 ${fdt_addr} ${fdtfile}; then saveenv; bootm ${bootaddr} - ${fdt_addr}; else bootm ${bootaddr}; fi
+```
+
+The card has an accessible FAT boot partition and ext4 root
+partition and is physically removable. This makes recovery by
+restoring the prior `uImage` via card reader straightforward. Do not
+treat a working boot with the existing module set as proof that a
+complete image or new module set has been hardware-tested.
+
 ## Reproducing the Oct 2026 kernel configuration
 
 On a Retrode3 with Nikolaus's installed Debian image:
