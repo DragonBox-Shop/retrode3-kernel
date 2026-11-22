@@ -24,9 +24,12 @@ full configuration and module-symbol data still need to be matched.
 
 The currently installed device reports
 `7.3.0-rc5-letux-mips-retrode3+` and the Retrode3 2.9.5 board
-uses `lx16-retrode-2.9.5.dtb`. Wi-Fi is reported not to work in
-7.3, despite working in 7.1. Do not mark a new image as hardware-approved
-until that regression and the full DTB have been checked.
+uses `lx16-retrode-2.9.5.dtb`. The ESP32 requires a newer firmware
+for the Linux 7.3 setup; missing Wi-Fi functionality should not be
+misattributed to a kernel or Device Tree regression without verification.
+Firmware compatibility is tracked separately from the kernel source
+reconstruction. Before declaring a kernel release hardware-approved,
+validate the DTB, cartridge slots, GPIO and driver interfaces.
 
 ## Source / release branches
 
