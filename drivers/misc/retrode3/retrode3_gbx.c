@@ -17,6 +17,18 @@
  * removed. This is intentionally conservative for the first hardware test.
  */
 
+/*
+ * MD-slot GPIO indices and GBx control lines (active LOW).
+ *
+ * First physical GB read: all 48 Nintendo-logo bytes were EXACTLY
+ * (expected << 1) & 0xff. In this driver, sampling addr GPIOs 8..15
+ * therefore returned GB D0 on bit 1 and never sampled GB D7.
+ * The experimentally indicated 8-bit window is addr GPIOs 9..16.
+ * This is a bench hypothesis, not a finalized hardware pinout.
+ */
+#define GBX_HIGH_DATA_FIRST 9
+#define GBX_HIGH_DATA_LAST  16
+
 /* MD edge address lines used as GBx control signals (active LOW). */
 #define GBX_RD     2
 #define GBX_CS_ROM 3
@@ -77,7 +89,8 @@ static int retrode3_gbx_prepare(struct retrode3_bus *bus, bool gba)
 	for (i = 0; i < bus->addrs->ndescs; ++i) {
 		if (i == GBX_RD || i == GBX_CS_ROM ||
 		    i == GBX_WR || i == GBX_CS_RAM ||
-		    i == GBX_AUDIO_IRQ || (i >= 8 && i <= 15))
+		    i == GBX_AUDIO_IRQ ||
+		    (i >= 8 && i <= GBX_HIGH_DATA_LAST))
 			continue;
 		ret = gpiod_direction_output(bus->addrs->desc[i], 0);
 		if (ret) return ret;
@@ -85,19 +98,28 @@ static int retrode3_gbx_prepare(struct retrode3_bus *bus, bool gba)
 	/* Clock idles low for this read-only header/ROM transport. */
 	set_bus_bit(bus->addrs->desc[GBX_CLK], 0);
 
-	/* GB: MD A8..15 sample D0..7; GBA: drive upper address A16..23. */
-	for (i = 8; i <= 15; ++i) {
+	/*
+	 * Do not drive GPIO A16 as a normal MD address: on the GBx
+	 * physical test the highest GB data bit appears to be here.
+	 * A8 remains INPUT/Hi-Z. On GBA, A9..A16 drive the eight
+	 * upper address bits; on GB the same GPIOs sample D0..D7.
+	 */
+	ret = gpiod_direction_input(bus->addrs->desc[8]);
+	if (ret)
+		return ret;
+	for (i = GBX_HIGH_DATA_FIRST; i <= GBX_HIGH_DATA_LAST; ++i) {
 		ret = gba ?
 			gpiod_direction_output(bus->addrs->desc[i], 0) :
 			gpiod_direction_input(bus->addrs->desc[i]);
-		if (ret) return ret;
+		if (ret)
+			return ret;
 	}
 	retrode3_gbx_idle(bus);
 	bus->current_addr = EOF - 1; /* invalidate normal MD address cache */
 	return 0;
 }
 
-/* The MD A8..15 pins are INPUTS for GB/GBC, unlike ordinary MD reads. */
+/* Read eight GB data bits on the experimentally observed GPIO 9..16. */
 static int retrode3_gbx_gb_read8(struct retrode3_bus *bus, u16 addr)
 {
 	unsigned int i;
@@ -108,7 +130,7 @@ static int retrode3_gbx_gb_read8(struct retrode3_bus *bus, u16 addr)
 	set_bus_bit(bus->addrs->desc[GBX_RD], 0);
 	udelay(1);
 	for (i = 0; i < 8; ++i) {
-		bit = get_bus_bit(bus->addrs->desc[8 + i]);
+		bit = get_bus_bit(bus->addrs->desc[GBX_HIGH_DATA_FIRST + i]);
 		if (bit < 0) {
 			value = bit;
 			break;
@@ -119,14 +141,14 @@ static int retrode3_gbx_gb_read8(struct retrode3_bus *bus, u16 addr)
 	return value;
 }
 
-/* GBA: address on MD D0..15 + A8..15, then D0..15 become inputs. */
+/* GBA: address on MD D0..15 + tested A9..16 high window (hypothesis). */
 static int retrode3_gbx_gba_read16(struct retrode3_bus *bus, u32 byte_addr)
 {
 	u32 word_addr = byte_addr >> 1;
 	int i, value;
 
 	for (i = 0; i < 8; ++i)
-		set_bus_bit(bus->addrs->desc[8 + i],
+		set_bus_bit(bus->addrs->desc[GBX_HIGH_DATA_FIRST + i],
 			    (word_addr >> (16 + i)) & 1);
 	set_word(bus, (u16)word_addr);
 	set_bus_bit(bus->addrs->desc[GBX_CS_ROM], 0);
