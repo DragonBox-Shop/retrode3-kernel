@@ -60,6 +60,36 @@ until a newly compiled test module produces a **valid GB header**
 and then a valid GBA header at 3.3 V. Do not re-run the old GB bench
 build. No 5-V switching on invalid headers.
 
+## Follow-up: isolated bit 7
+
+Second GB/GBC header read (after switching the eight sampled GPIOs
+from A8..A15 to A9..A16) returns the correct ASCII title `PINBALL`,
+and valid low seven bits in the Nintendo logo, but *all bit 7 samples
+are zero*. Header checksum was calculated `AC` vs sampled `2C`,
+again exactly the missing high bit. That validates the low seven-bit
+window, not the proposed eighth GPIO input (A16).
+
+Add **mode 26** for a read-only GPIO snapshot: byte offsets equal
+`GB_address * 2`, the two returned bytes form a little-endian
+mask of GPIO input levels on **MD A7..A18** during the same GB
+`/CS_ROM` + `/RD` cycle. All of those pins are temporarily INPUT/Hi-Z
+while in GB mode; A19 audio/IRQ is also always input. No writes.
+
+To collect the diagnostic at 3.3 V after loading the updated
+experimental kernel:
+
+```sh
+python3 tools/gbx-md-hwtest.py arm
+# Insert the already identified GB 'PINBALL' cartridge:
+python3 tools/gbx-md-hwtest.py gb --pins
+```
+
+The user-space diagnostic prints several known Nintendo-logo bytes with
+expected D7 values alongside the sampled GPIOs. If none of the input
+GPIOs correlate with D7 we must revisit the physical wiring or input
+buffer direction rather than fabricating bit 7 in software. The
+checksum will still fail until the actual signal path is fixed.
+
 ## Device ABI (private experimental offsets)
 
 `pread` on `/dev/slot-md` with 64-bit offset
@@ -70,6 +100,7 @@ build. No 5-V switching on invalid headers.
 | 23 | GB/GBC ROM read 8-bit | 0..0x7fff |
 | 24 | GBA ROM read, low window | 0..0xffffff |
 | 25 | GBA ROM read, high window | 0..0xffffff (physical +0x1000000) |
+| 26 | GB read-only GPIO pin snapshot, diagnostic only at 3.3 V | 0..0xffff (2 bytes per GB ROM address; A7..A18 => bits 0..11) |
 
 The two GBA windows cover 32 MiB. Returned GBA bytes use little-endian
 word order, matching the stage-1 portable `gba_read16(byte_addr)`.
