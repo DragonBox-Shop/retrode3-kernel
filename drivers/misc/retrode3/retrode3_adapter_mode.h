@@ -19,12 +19,17 @@
 #define RETRODE3_GBX_MD_GB_READ8       23U
 #define RETRODE3_GBX_MD_GBA_READ16_LO  24U
 #define RETRODE3_GBX_MD_GBA_READ16_HI  25U
+/* Debug-only: each 16-bit little-endian word has MD A7..A18 GPIO levels
+ * sampled during a GB /RD cycle at ROM offset (byte_offset >> 1).
+ * Kernel requires 3.3V for this mode. */
+#define RETRODE3_GBX_MD_GB_PINSCAN     26U
 
 static inline int retrode3_gbx_mode_is_read(unsigned int mode)
 {
     return mode == RETRODE3_GBX_MD_GB_READ8 ||
            mode == RETRODE3_GBX_MD_GBA_READ16_LO ||
-           mode == RETRODE3_GBX_MD_GBA_READ16_HI;
+           mode == RETRODE3_GBX_MD_GBA_READ16_HI ||
+           mode == RETRODE3_GBX_MD_GB_PINSCAN;
 }
 
 static inline int retrode3_adapter_mode_is_read(unsigned int mode)
