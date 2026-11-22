@@ -1167,9 +1167,22 @@ static int retrode3_open(struct inode *inode, struct file *file)
         dev_dbg(&slot->dev, "%s\n", __func__);
 
 	ret = gpiod_get_value(slot->cd);	// check cart detect
+	if (ret < 0)
+		return ret;
 
-	if (!ret)
-		return -ENODEV;	// no cart is inserted
+	/*
+	 * GBx-0011 uses the MD socket as a generic GB/GBC/GBA transport.
+	 * The physical MD cartridge detect switch may stay open for a
+	 * GBx adapter, especially with GBA cartridges. Allow open only
+	 * for an explicitly armed, dedicated, read-only GBx bench on MD.
+	 * Normal read/write modes remain blocked by gbx_md_test, and
+	 * gbx_read validates the physical MD slot and voltage again.
+	 *
+	 * In this mode absence must be determined by the validated GB/GBA
+	 * ROM header, not by the MD cartridge-detect GPIO.
+	 */
+	if (!ret && !(gbx_md_test && retrode3_gbx_md_slot(slot)))
+		return -ENODEV;
 
 	get_device(&slot->dev);	// increment the reference count for the device
 
