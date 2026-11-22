@@ -19,8 +19,9 @@ Letux kernel alone.
 
 This integration is a **source candidate**, NOT a verified byte-for-byte
 reconstruction of Nikolaus's Oct 1 2026 Debian build
-`7.3-rc5-20261001095807`. That build's exact Git revision,
-full configuration and module-symbol data still need to be matched.
+`7.3-rc5-20261001095807`. That build's exact Git revision and full source-to-image correspondence
+are not yet established; the 2.9.5 DTB and 86 imported module symbol
+CRCs have since been independently matched (see below).
 
 The currently installed device reports
 `7.3.0-rc5-letux-mips-retrode3+` and the Retrode3 2.9.5 board
@@ -114,8 +115,9 @@ Observed successful build outputs:
 * Kernel release: `7.3.0-rc5-letux-mips-retrode3+`.
 * `vmlinux` built; `arch/mips/boot/uImage` symlinks to `uImage.gz`.
 * U-Boot image header: MIPS Linux kernel, gzip compressed; data size
-  **6,651,493 bytes**; load address `80010000`; entry point
-  `80b07568`. The header timestamp is not a reproducibility guarantee.
+  **6,651,492 bytes** after the final incremental rebuild; load address
+  `80010000`; entry point `80b07568`. The header timestamp is not a
+  reproducibility guarantee.
 * `drivers/misc/retrode3/retrode3.ko` vermagic:
   `7.3.0-rc5-letux-mips-retrode3+ preempt mod_unload modversions MIPS32_R2 32BIT`.
 * `modules.order` lists **405** modules, and **405** `.ko` files exist.
@@ -124,10 +126,31 @@ Observed successful build outputs:
 * The 2.9.5 DTB also matches Nikolaus's packaged DTB byte-for-byte
   (see the separate SHA-256 verification above).
 
+### Original image and module comparison (2026-11-22)
+
+The developer copied the installed Nikolaus image and module to
+`~/retrode3-reference/7.3-rc5/` and compared them with the new build.
+
+* Original `uImage`: 6,659,739 compressed payload bytes; load address
+  `80010000`, entry address `80b0bd48`, SHA-256
+  `4b531c0641e74f21784a0d9c872a3a5d2fb15782c661a63dbdce929d12266f22`.
+* Locally built `uImage`: 6,651,492 compressed payload bytes; load address
+  `80010000`, entry address `80b07568`, SHA-256
+  `db4e7a3b1c9f5e722cd340a40ae005a0d7f0a78e31f1d1578227b5204601a442`.
+  The images are **not identical**; their payload and entry addresses
+  differ. Header compatibility alone does not demonstrate bootability.
+* Original and local `retrode3.ko` files have exactly matching
+  `vermagic`:
+  `7.3.0-rc5-letux-mips-retrode3+ preempt mod_unload modversions MIPS32_R2 32BIT`.
+* `modprobe --dump-modversions` on the two modules reports **86
+  imported versioned symbols each**. After sorting, `diff -u`
+  reports **no CRC differences**. This supports compatibility for
+  those imports, but is not a complete proof of module/kernel ABI
+  identity or on-device functionality.
+
 **Not yet validated:** runtime boot, functional on-device hardware
-tests, exact compatibility of all symbol CRCs with Nikolaus's
-installed binaries, and identity of the generated kernel image with
-the October release. Do not replace an installed kernel or module
+tests, the entire exported kernel ABI, and identity of the generated
+kernel image with the October release. Do not replace an installed kernel or module
 without backups and a tested rollback path. Keep this branch separate
 from release branches until hardware approval.
 
