@@ -7,8 +7,8 @@ Stand: 2026-11-22. Build and boot documentation:
 
 | Branch | Ownership / purpose | Automatic changes |
 | --- | --- | --- |
-| `project-retrode3-v2` | Nikolaus' existing Retrode3 development branch in this repository; **keep intact** | Only the CI monitoring files installed on the current default branch |
-| `upstream/nikolaus-retrode3` | Read-only-by-policy mirror of the complete `project-retrode3-v2` history | Daily GitHub Actions update; **no merge** |
+| `project-retrode3-v2` | Letux Retrode3 project source branch in this repository; **keep intact** | Only the CI monitoring files installed on the current default branch |
+| `upstream/letux-retrode3` | Read-only-by-policy mirror of the complete `project-retrode3-v2` history | Daily GitHub Actions update; **no merge** |
 | `upstream/letux-current` | Mirror of `goldelico/letux-kernel:letux-current` | Existing daily GitHub Actions update; **no merge** |
 | `develop` | Retrode3 integration, driver and DTS/DTSI work for current kernel generation | Changes reviewed or intentionally authored; no automatic upstream imports |
 | `master` | Hardware-tested kernel source baseline used for releases | Updated only after hardware validation, not by mirror automation |
@@ -18,7 +18,7 @@ Stand: 2026-11-22. Build and boot documentation:
 Old master (7.2) and old develop (7.1) must be preserved in
 archive branches before source-history migrations. Never delete a branch
 that still contains unmerged work. GitHub's default branch should be
-`master` after the 7.3 migration, rather than Nikolaus' project
+`master` after the 7.3 migration, rather than Letux' project
 branch. **Scheduled GitHub Actions execute from the default branch**;
 ensure both mirror workflows are present there before changing it.
 
@@ -43,7 +43,7 @@ the integration tree; see the boot/build evidence document above.
   `goldelico/letux-kernel:letux-current` into
   `upstream/letux-current`.
 - `.github/workflows/sync-retrode3-upstream.yml`: mirrors
-  `project-retrode3-v2` into `upstream/nikolaus-retrode3`. It
+  `project-retrode3-v2` into `upstream/letux-retrode3`. It
   compares each new snapshot with the old mirror, checks only the
   Retrode3 source/integration paths listed above and creates a
   **review issue** when those paths change. It includes the changed
@@ -53,7 +53,7 @@ the integration tree; see the boot/build evidence document above.
 
 A mirror branch can be force-updated to accurately follow its source,
 but the workflows do **not** push to `develop`, `master`, or
-`project-retrode3-v2`. If Nikolaus rewrites history or if a shallow
+`project-retrode3-v2`. If Letux rewrites history or if a shallow
 history prevents meaningful `git cherry` results, perform a manual
 review. A `-` from `git cherry` is only evidence that an
 equivalent patch exists; it is **not** a proof that all behavior,
@@ -71,14 +71,14 @@ for successful execution.
 2. Review the new source commits and file-scoped diff, then compare
    patch content against `develop`:
    ```sh
-   git fetch origin develop upstream/nikolaus-retrode3 upstream/letux-current
-   git cherry origin/upstream/nikolaus-retrode3 origin/develop
+   git fetch origin develop upstream/letux-retrode3 upstream/letux-current
+   git cherry origin/upstream/letux-retrode3 origin/develop
    git log --cherry-pick --right-only --oneline \
-     origin/develop...origin/upstream/nikolaus-retrode3
+     origin/develop...origin/upstream/letux-retrode3
    ```
 3. If the patch was already incorporated, document that fact and
    avoid importing it again. Where necessary, use `git range-diff`
-   and inspect the full diff, especially if Nikolaus used squash,
+   and inspect the full diff, especially if Letux used squash,
    rebase or adapted changes.
 4. Select only wanted changes, preferably as small, reviewable PRs to
    `develop`. Do not merge the entire moving project or Letux
@@ -92,7 +92,7 @@ for successful execution.
    identity. Release image and package publication are **separate**
    gates.
 
-When submitting our changes to Nikolaus, send narrowly scoped
+When submitting our changes to Letux, send narrowly scoped
 driver/DTS commits. If possible preserve individual commits rather
 than squashing unrelated patches. After upstream acceptance,
 `git cherry` can help detect equivalent changes regardless of
@@ -105,7 +105,7 @@ Our independently built 7.3.0-rc5 kernel (Bootlin GCC 8.2.0) was
 physically booted on Retrode3 2.9.5. USB networking, cartridge
 sense on MD/SNES, controller device registration and the Web
 interface's automatic cartridge recognition worked. The tested
-2.9.5 DTB matched Nikolaus' existing DTB by SHA256. Our separately
+2.9.5 DTB matched the existing DTB by SHA256. Our separately
 built full module set and final SD image have not yet been subjected
 to complete release acceptance.
 
