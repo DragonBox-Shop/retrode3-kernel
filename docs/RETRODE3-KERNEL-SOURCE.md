@@ -148,6 +148,21 @@ The developer copied the installed Nikolaus image and module to
   those imports, but is not a complete proof of module/kernel ABI
   identity or on-device functionality.
 
+After the reference comparison, `CONFIG_GCC_PLUGINS` was explicitly
+disabled to match Nikolaus's original configuration. `scripts/diffconfig`
+then reported only the GCC 8.2.0 compiler identity and build-environment
+Rust/OpenSSL capability probes as differences. An incremental `modules`
+and `uImage` build completed successfully. The final reported build
+retained the MIPS U-Boot image's **6,651,492-byte** compressed payload,
+`80010000` load address and `80b07568` entry address. Its current
+SHA-256 is
+`526faed773ec1501aab951802c2f7cc868cda53843a97e2379944a98afd973c9`
+(header timestamp: 2026-11-22 02:21:05). The original image remains
+`4b531c0641e74f21784a0d9c872a3a5d2fb15782c661a63dbdce929d12266f22`.
+A repeated `modprobe --dump-modversions` comparison still showed
+all **86** imported symbol CRCs identical. Neither image identity nor
+on-device boot has been demonstrated.
+
 **Not yet validated:** runtime boot, functional on-device hardware
 tests, the entire exported kernel ABI, and identity of the generated
 kernel image with the October release. Do not replace an installed kernel or module
