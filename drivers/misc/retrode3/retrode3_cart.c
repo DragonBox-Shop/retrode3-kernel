@@ -182,6 +182,8 @@ static struct retrode3_slot *legacy_bridge_md_slot(struct retrode3_bus *bus)
 	return NULL;
 }
 
+#include "retrode3_gbx.c"
+
 static ssize_t retrode3_read(struct file *file, char __user *buf,
 			size_t count, loff_t *ppos)
 {
@@ -205,6 +207,13 @@ static ssize_t retrode3_read(struct file *file, char __user *buf,
 #endif
 
 	read = 0;
+
+	if (retrode3_gbx_mode_is_read(mode))
+		return retrode3_gbx_read(slot, buf, count, ppos, mode);
+	/* The GBx bus swaps GPIO directions. Block all other transports while
+	 * armed or after its first use, even if the module parameter was reset. */
+	if (gbx_md_test || slot->bus->gbx_active)
+		return -EBUSY;
 
 	/* This bench mode deliberately blocks normal MD/NES cartridge reads. */
 	if (legacy_bridge_hiz_test &&
@@ -712,6 +721,10 @@ static ssize_t retrode3_write(struct file *file, const char __user *buf,
 // dev_info(&slot->dev, "%s: ppos=%08llx (fram=%d mode=%d addr=%x) count=%ld\n", __func__, *ppos, slot->fram_mode, mode, addr, count);
 
 	written = 0;
+
+	/* No writes of any kind during a GBx bus-direction experiment. */
+	if (gbx_md_test || slot->bus->gbx_active)
+		return -EBUSY;
 
 	/* Independent narrowly guarded mapper mode; no other writes enabled. */
 	if (mode == RETRODE3_ADAPTER_SMS_MD_MAPPER_WRITE)

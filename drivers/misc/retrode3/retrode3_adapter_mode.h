@@ -15,6 +15,18 @@
  */
 #define RETRODE3_ADAPTER_SMS_MD_MAPPER_WRITE 22U
 
+/* Dedicated Retrode2 GBx-0011 MD-slot ROM-only bus transactions. */
+#define RETRODE3_GBX_MD_GB_READ8       23U
+#define RETRODE3_GBX_MD_GBA_READ16_LO  24U
+#define RETRODE3_GBX_MD_GBA_READ16_HI  25U
+
+static inline int retrode3_gbx_mode_is_read(unsigned int mode)
+{
+    return mode == RETRODE3_GBX_MD_GB_READ8 ||
+           mode == RETRODE3_GBX_MD_GBA_READ16_LO ||
+           mode == RETRODE3_GBX_MD_GBA_READ16_HI;
+}
+
 static inline int retrode3_adapter_mode_is_read(unsigned int mode)
 {
     return mode == RETRODE3_ADAPTER_READ_D0_D7 ||

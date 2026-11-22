@@ -48,6 +48,14 @@ module_param_named(sms_mapper_write_test, sms_mapper_write_test, bool, 0644);
 MODULE_PARM_DESC(sms_mapper_write_test,
 	"BENCH ONLY: guarded SMS $FFFC-$FFFF mapper writes at 5V with high-Z");
 
+/* Operator-only GBx-0011 hardware bench. Activate with the MD slot empty,
+ * then insert the adapter. No normal MD/SNES/NES reads or writes may run
+ * until this module is reloaded without the GBx adapter attached. */
+static bool gbx_md_test;
+module_param_named(gbx_md_test, gbx_md_test, bool, 0644);
+MODULE_PARM_DESC(gbx_md_test,
+	"BENCH ONLY: GBx-0011 MD bus cycles (modes 23/24/25), no cart writes");
+
 /* low level address and data bus access */
 
 // FXIME: get_multiple / set_multiple could be much faster, if supported by device driver

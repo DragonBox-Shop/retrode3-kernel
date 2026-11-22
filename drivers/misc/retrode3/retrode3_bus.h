@@ -49,6 +49,7 @@ struct retrode3_bus {
 	struct retrode3_slot *slots[4];
 	struct mutex select_lock;	// used by select_slot
 	uint32_t current_addr;
+	bool gbx_active; /* sticky bench state: A19 stays high-Z until module reload */
 	struct clk *clks[NUM_CLOCKS];
 };
 
