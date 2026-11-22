@@ -394,6 +394,8 @@ static void retrode3_unregister_slots(struct retrode3_bus *bus)
 		if (slot->is_controller) {
 			device_unregister(&slot->dev);
 		} else {
+			/* Polling has stopped; detach the LED trigger before slot release. */
+			led_trigger_unregister_simple(slot->status_led_trigger);
 			cdev_device_del(&slot->cdev, &slot->dev);
 			put_device(&slot->dev);
 		}

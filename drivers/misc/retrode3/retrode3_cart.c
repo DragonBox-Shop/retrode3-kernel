@@ -148,6 +148,16 @@ static inline int _set_address(int mode, struct retrode3_slot *slot, uint32_t ad
 #define set_address(addr) if ((err = _set_address(mode, slot, (addr))) < 0) goto failed
 
 /*
+ * Cartridge LED: steady when present, with brief inverted I/O pulses.
+ * The LED core handles the blink; no GPIO/I2C calls in the byte loop.
+ */
+static inline void retrode3_cart_led_activity(struct retrode3_slot *slot)
+{
+	if (slot->cd_state == 1 && slot->status_led_trigger)
+		led_trigger_blink_oneshot(slot->status_led_trigger, 90, 90, 1);
+}
+
+/*
  * This function reads the slot. The ppos points directly to the
  * memory location. But also includes a special access mode in the upper bits.
  */
@@ -289,6 +299,8 @@ static ssize_t retrode3_read(struct file *file, char __user *buf,
 // 	dev_info(&slot->dev, "%s: ppos=%08llx (fram=%d mode=%d addr=%x) count=%ld\n", __func__, *ppos, slot->fram_mode, mode, addr, count);
 
 	while (count > 0) {
+		if (!(read & 0x3ff))
+			retrode3_cart_led_activity(slot);
 #ifndef CONFIG_RETRODE3_BUFFER
 		unsigned long remaining;
 #endif
@@ -725,6 +737,8 @@ static ssize_t retrode3_write(struct file *file, const char __user *buf,
 
 if ((addr &0xff) == 0) dev_info(&slot->dev, "%s: write mode=%02x %08x %08x\n", __func__, mode, addr, count);
 	while (count > 0) {
+		if (!(written & 0x3ff))
+			retrode3_cart_led_activity(slot);
 		// int allowed;
 		uint8_t byte;
 
@@ -1227,9 +1241,6 @@ int retrode3_probe_slot(struct retrode3_slot *slot, struct device_node *child)
 		ret = PTR_ERR(slot->cd);
 		goto err_put_device;
 	}
-	slot->led = devm_gpiod_get(dev, "status", GPIOD_OUT_HIGH);
-	if (!IS_ERR_OR_NULL(slot->led))
-		gpiod_set_value(slot->led, 0);
 	slot->power = devm_gpiod_get(dev, "power", GPIOD_IN);
 	of_property_read_u32_index(child, "address-width", 0, &slot->addr_width);
 	of_property_read_u32_index(child, "bus-width", 0, &slot->bus_width);
@@ -1247,6 +1258,18 @@ int retrode3_probe_slot(struct retrode3_slot *slot, struct device_node *child)
 	}
 
 	slot->cd_state = -1;
+	/* status-led points to a gpio-leds class device, not a status GPIO. */
+	if (of_property_present(child, "status-led")) {
+		scnprintf(slot->status_led_trigger_name,
+			 sizeof(slot->status_led_trigger_name), "retrode3-%s",
+			 dev_name(dev));
+		led_trigger_register_simple(slot->status_led_trigger_name,
+					    &slot->status_led_trigger);
+		if (!slot->status_led_trigger)
+			dev_warn(dev, "cartridge LED trigger unavailable\n");
+		else
+			led_trigger_event(slot->status_led_trigger, LED_OFF);
+	}
 	INIT_DELAYED_WORK(&slot->work, retrode3_cd_work);
 
 	return 0;
@@ -1280,7 +1303,8 @@ static void retrode3_update_cd(struct retrode3_slot *slot)
 
 		slot->cd_state = cd_state;
 
-		// automatically control status LED if defined?
+		led_trigger_event(slot->status_led_trigger,
+				  cd_state ? LED_FULL : LED_OFF);
 
 		if (slot->bus_width == 16 && cd_state == 0)
 			set_slot_power_mV(slot, 3300);	// turn off 5V mode (for MD slot)
