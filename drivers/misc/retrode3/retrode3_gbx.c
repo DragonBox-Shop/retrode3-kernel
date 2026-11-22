@@ -240,10 +240,21 @@ static ssize_t retrode3_gbx_read(struct retrode3_slot *slot,
 	}
 	err = 0;
 out:
-	/* Keep A19 in high-Z, never restore a driven MD address bit
-	 * while a GBx cartridge may still be present. */
+	/*
+	 * Leave ALL shared GB data/GBA upper-address lines in high-Z after
+	 * every call. In particular the empty-bus arm uses a GBA cycle;
+	 * without releasing A16 it could contend with GB cartridge D7
+	 * when the user inserts the cartridge after arming.
+	 * Do not restore normal MD address outputs while GBx is armed.
+	 */
 	retrode3_gbx_idle(bus);
 	end_drive_word(bus);
+	{
+		int pin;
+
+		for (pin = 8; pin <= GBX_HIGH_DATA_LAST; ++pin)
+			gpiod_direction_input(bus->addrs->desc[pin]);
+	}
 	bus->current_addr = EOF - 1;
 	select_slot(bus, NULL);
 	return completed ? (ssize_t)completed : err;
