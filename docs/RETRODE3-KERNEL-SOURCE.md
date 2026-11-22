@@ -73,6 +73,64 @@ output, **not** the exact original source revision, the other hardware
 revisions, the entire kernel image, or its modules. These require
 separate release verification.
 
+## Successful independent full build (2026-11-22; hardware test pending)
+
+The Retrode3 7.3 integration worktree was built under a rootless Podman
+container (Debian bookworm) with the independently downloaded Bootlin
+MIPS32EL glibc Buildroot 2018.11 GCC 8.2.0 cross-toolchain, which is
+located **outside** the container on the developer host at
+`~/retrode3-timing/toolchains/mips32el--glibc--bleeding-edge-2018.11-1`.
+The original kernel's `init/.main.o.cmd` confirmed that the full
+kernel used this compiler path:
+
+```
+/build/toolchains/mips32el--glibc--bleeding-edge-2018.11-1/bin/mipsel-linux-gcc
+```
+
+The mount is important: mount `~/retrode3-timing` as `/build`,
+then build in `/build/retrode3-7.3-integration`. Mounting only the
+kernel worktree does **not** make the toolchain available. For example:
+
+```sh
+podman run --rm --userns=keep-id \
+  -v "$HOME/retrode3-timing:/build" \
+  -w /build/retrode3-7.3-integration \
+  localhost/retrode3-mips-builder:uboot \
+  sh -ec '
+    PREFIX=/build/toolchains/mips32el--glibc--bleeding-edge-2018.11-1/bin/mipsel-linux-
+    make ARCH=mips CROSS_COMPILE="$PREFIX" LOCALVERSION=+ -j2 uImage modules dtbs
+  '
+```
+
+The `uboot` image is a local derivative of the existing builder image
+with Debian `u-boot-tools` installed to supply `mkimage`. Without it,
+the compressed U-Boot image target fails even after `vmlinux` and
+modules compile. Explicit `LOCALVERSION=+` is required to produce the
+installed kernel release string; do not rely on `scripts/setlocalversion`
+inferring `+` from the checkout's Git state.
+
+Observed successful build outputs:
+
+* Kernel release: `7.3.0-rc5-letux-mips-retrode3+`.
+* `vmlinux` built; `arch/mips/boot/uImage` symlinks to `uImage.gz`.
+* U-Boot image header: MIPS Linux kernel, gzip compressed; data size
+  **6,651,493 bytes**; load address `80010000`; entry point
+  `80b07568`. The header timestamp is not a reproducibility guarantee.
+* `drivers/misc/retrode3/retrode3.ko` vermagic:
+  `7.3.0-rc5-letux-mips-retrode3+ preempt mod_unload modversions MIPS32_R2 32BIT`.
+* `modules.order` lists **405** modules, and **405** `.ko` files exist.
+* `make ... modules dtbs` completed successfully after the `uImage`
+  target was built.
+* The 2.9.5 DTB also matches Nikolaus's packaged DTB byte-for-byte
+  (see the separate SHA-256 verification above).
+
+**Not yet validated:** runtime boot, functional on-device hardware
+tests, exact compatibility of all symbol CRCs with Nikolaus's
+installed binaries, and identity of the generated kernel image with
+the October release. Do not replace an installed kernel or module
+without backups and a tested rollback path. Keep this branch separate
+from release branches until hardware approval.
+
 ## Reproducing the Oct 2026 kernel configuration
 
 On a Retrode3 with Nikolaus's installed Debian image:
