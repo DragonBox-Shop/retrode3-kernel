@@ -238,10 +238,23 @@ The DTSI declares `linux,default-trigger = "heartbeat"` for the
 cartridge and controller LEDs and associates cartridge slots with
 `status-led` phandles. The integrated `retrode3_cart.c` has a
 TODO for automatically updating the status LED upon cartridge-sense
-changes. Verify running `/sys/class/leds/*/trigger`, any userspace
-udev/LED hooks, and the relationship between the original installed
-module and integrated driver source before changing code. A passing
-boot and cartridge-sense test alone does **not** approve the release.
+changes. Further hardware observation: **removing and reinserting a cartridge
+does switch its blue LED from heartbeat to steady on**, while a cartridge
+already present at boot remains on heartbeat. The running system has
+`/etc/udev/rules.d/retrode3.sh` and
+`/etc/udev/rules.d/retrode3.rules`, with a `KOBJ_CHANGE` event handler.
+This greatly narrows the issue to initial event delivery/processing or
+startup state reconciliation, rather than a permanently broken LED
+controller. A possible race with udev startup is a hypothesis, **not
+yet proven**. Test by issuing a targeted synthetic `change` event via
+`udevadm trigger --action=change /sys/class/retrode3/slot-md`
+(and likewise `slot-snes`) with cartridges already inserted, then
+verify LED triggers. If reproduced, implement an idempotent late
+startup state synchronization in the Debian SysV-Init/userspace
+packaging rather than changing the kernel without evidence.
+
+A passing boot and cartridge-sense test alone does **not** approve
+the release.
 
 ## Reproducing the Oct 2026 kernel configuration
 
