@@ -34,6 +34,32 @@ voltage other than 3.3 V. The kernel itself does not change voltages:
 the central CLI hardware-profile mechanism will own that in the final
 dynamic plugins, just as for SMS-MD. No automatic 5-V probes.
 
+## First physical GB cartridge result and follow-up fix
+
+First GB/GBC `--raw` header read at 3.3 V: the 48 bytes in
+`0x104..0x133` matched the standard Nintendo logo under the exact
+transformation `observed = (expected << 1) & 0xff`. The first title
+bytes `A0 92 9C 84 82 98 98` similarly become `PINBALL` when
+shifted right one bit. This is **not** random ROM data or proof of
+incorrect GB address/control timing.
+
+The original schematic/netlist notes document MD `A8..A15` for the
+GBx high/data connector pins, but the live read on the Retrode3
+`addr-gpios[8..15]` yielded data shifted left one, with all bit 0s
+clear. This **suggests** GB data D0..D7 are actually observed via
+`addr-gpios[9..16]`. Do not silently edit the source netlist claim:
+the source of the one-pin discrepancy still requires confirmation
+against the physical adapter/host wiring.
+
+Before this correction, GPIO A16 was configured as an OUTPUT; if it
+carries GB D7 this is a potential electrical conflict. The updated
+bench **leaves A16 INPUT for GB** and samples nine-to-sixteen; GBA
+upper-address bits are tentatively driven on nine-to-sixteen as the
+same shared connector pins. Neither result is considered validated
+until a newly compiled test module produces a **valid GB header**
+and then a valid GBA header at 3.3 V. Do not re-run the old GB bench
+build. No 5-V switching on invalid headers.
+
 ## Device ABI (private experimental offsets)
 
 `pread` on `/dev/slot-md` with 64-bit offset
