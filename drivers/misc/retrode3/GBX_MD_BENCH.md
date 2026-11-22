@@ -13,8 +13,16 @@ With no GB/GBC/GBA cartridge inserted, run the matching OSCR tool
 performs a single empty GBA-mode bus read, which makes MD A19 high-Z.
 **Setting the module parameter alone does not reconfigure A19.**
 Only after this arm step insert the cartridge and run the selected header
-probe with `python3 tools/gbx-md-hwtest.py gb` or `gba`. The kernel
-blocks ALL ordinary slot reads and writes while armed; after the first
+probe with `python3 tools/gbx-md-hwtest.py gb` or `gba`.
+
+The GBx-0011 may not actuate the physical MD cartridge-detect switch,
+especially with GBA. The experimental kernel allows opening the MD
+character device without an active sense pin ONLY while `gbx_md_test=1`.
+The validated GB/GBA header is the cartridge-family detection, always
+at 3.3 V. An invalid or missing header is a failed probe, not permission
+to try 5 V. The bypass is not enabled for normal MD reads.
+
+The kernel blocks ALL ordinary slot reads and writes while armed; after the first
 GBx operation it also blocks them if the parameter is subsequently reset.
 Do not run another core until the GBx adapter is removed and the module
 has been reloaded. Save the original module and never replace it in-place.
