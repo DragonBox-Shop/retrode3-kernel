@@ -28,6 +28,8 @@
  */
 #define GBX_HIGH_DATA_FIRST 9
 #define GBX_HIGH_DATA_LAST  16
+#define GBX_DIAG_FIRST      7
+#define GBX_DIAG_LAST       18
 
 /* MD edge address lines used as GBx control signals (active LOW). */
 #define GBX_RD     2
@@ -90,7 +92,7 @@ static int retrode3_gbx_prepare(struct retrode3_bus *bus, bool gba)
 		if (i == GBX_RD || i == GBX_CS_ROM ||
 		    i == GBX_WR || i == GBX_CS_RAM ||
 		    i == GBX_AUDIO_IRQ ||
-		    (i >= 8 && i <= GBX_HIGH_DATA_LAST))
+		    (i >= GBX_DIAG_FIRST && i <= GBX_DIAG_LAST))
 			continue;
 		ret = gpiod_direction_output(bus->addrs->desc[i], 0);
 		if (ret) return ret;
@@ -104,13 +106,16 @@ static int retrode3_gbx_prepare(struct retrode3_bus *bus, bool gba)
 	 * A8 remains INPUT/Hi-Z. On GBA, A9..A16 drive the eight
 	 * upper address bits; on GB the same GPIOs sample D0..D7.
 	 */
-	ret = gpiod_direction_input(bus->addrs->desc[8]);
-	if (ret)
-		return ret;
-	for (i = GBX_HIGH_DATA_FIRST; i <= GBX_HIGH_DATA_LAST; ++i) {
-		ret = gba ?
-			gpiod_direction_output(bus->addrs->desc[i], 0) :
-			gpiod_direction_input(bus->addrs->desc[i]);
+	/*
+	 * A7/A8 and A17/A18 stay Hi-Z for diagnostic sampling. They
+	 * must not accidentally drive an unknown GBx data connection.
+	 */
+	for (i = GBX_DIAG_FIRST; i <= GBX_DIAG_LAST; ++i) {
+		if (i >= GBX_HIGH_DATA_FIRST && i <= GBX_HIGH_DATA_LAST &&
+		    gba)
+			ret = gpiod_direction_output(bus->addrs->desc[i], 0);
+		else
+			ret = gpiod_direction_input(bus->addrs->desc[i]);
 		if (ret)
 			return ret;
 	}
@@ -136,6 +141,35 @@ static int retrode3_gbx_gb_read8(struct retrode3_bus *bus, u16 addr)
 			break;
 		}
 		value |= !!bit << i;
+	}
+	retrode3_gbx_idle(bus);
+	return value;
+}
+
+
+/*
+ * Bench-only GB pin snapshot. For one ROM address, return bits 0..11
+ * describing INPUT GPIOs MD A7..A18 while the cartridge /RD is active.
+ * This identifies where the missing GB data bit 7 physically appears.
+ * Do not expose this mode in a normal cartridge core / web interface.
+ */
+static int retrode3_gbx_gb_pins(struct retrode3_bus *bus, u16 addr)
+{
+	unsigned int i;
+	int value = 0;
+
+	set_word(bus, addr);
+	set_bus_bit(bus->addrs->desc[GBX_CS_ROM], 0);
+	set_bus_bit(bus->addrs->desc[GBX_RD], 0);
+	udelay(2);
+	for (i = GBX_DIAG_FIRST; i <= GBX_DIAG_LAST; ++i) {
+		int bit = get_bus_bit(bus->addrs->desc[i]);
+
+		if (bit < 0) {
+			value = bit;
+			break;
+		}
+		value |= !!bit << (i - GBX_DIAG_FIRST);
 	}
 	retrode3_gbx_idle(bus);
 	return value;
@@ -171,9 +205,11 @@ static ssize_t retrode3_gbx_read(struct retrode3_slot *slot,
 				loff_t *ppos, u32 mode)
 {
 	struct retrode3_bus *bus = slot->bus;
-	const bool gba = mode != RETRODE3_GBX_MD_GB_READ8;
+	const bool gba = mode == RETRODE3_GBX_MD_GBA_READ16_LO ||
+			 mode == RETRODE3_GBX_MD_GBA_READ16_HI;
+	const bool pins = mode == RETRODE3_GBX_MD_GB_PINSCAN;
 	const u32 addr = (u32)(*ppos & 0xffffffULL);
-	const u32 limit = gba ? 0x1000000U : 0x8000U;
+	const u32 limit = gba ? 0x1000000U : (pins ? 0x10000U : 0x8000U);
 	u32 full_addr;
 	u8 block[128];
 	size_t completed = 0;
@@ -190,7 +226,7 @@ static ssize_t retrode3_gbx_read(struct retrode3_slot *slot,
 	/* Bounded transactions prevent one large read from monopolizing the bus. */
 	count = min_t(size_t, count, 4096);
 	voltage = get_slot_power_mV(slot);
-	if (gba && voltage != 3300)
+	if ((gba || pins) && voltage != 3300)
 		return -EPERM;
 	if (!gba && voltage != 3300 && voltage != 5000)
 		return -EPERM;
@@ -210,7 +246,21 @@ static ssize_t retrode3_gbx_read(struct retrode3_slot *slot,
 
 		retrode3_cart_led_activity(slot);
 		for (i = 0; i < n; ) {
-			if (!gba) {
+			if (pins) {
+				u32 offset = full_addr + completed + i;
+				int snapshot = retrode3_gbx_gb_pins(bus,
+								 (u16)(offset >> 1));
+
+				if (snapshot < 0) {
+					err = snapshot;
+					goto out;
+				}
+				block[i++] = (offset & 1) ?
+						(u8)(snapshot >> 8) :
+						(u8)snapshot;
+				if (!(offset & 1) && i < n)
+					block[i++] = (u8)(snapshot >> 8);
+			} else if (!gba) {
 				err = retrode3_gbx_gb_read8(bus,
 							   (u16)(full_addr + completed + i));
 				if (err < 0)
@@ -252,7 +302,7 @@ out:
 	{
 		int pin;
 
-		for (pin = 8; pin <= GBX_HIGH_DATA_LAST; ++pin)
+		for (pin = GBX_DIAG_FIRST; pin <= GBX_DIAG_LAST; ++pin)
 			gpiod_direction_input(bus->addrs->desc[pin]);
 	}
 	bus->current_addr = EOF - 1;
