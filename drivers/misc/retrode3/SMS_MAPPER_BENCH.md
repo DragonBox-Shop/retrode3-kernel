@@ -28,9 +28,11 @@ Write values are restricted:
 - SMS $FFFE = 1 (map page 1 to bank 1)
 - SMS $FFFF = bank 0..63 (page 2 bank switch; cleanup bank 2)
 
-The path checks **5 V** at the physical MD slot and that no other
-cartridge occupies another slot. No other write mode or address is
-allowed. The normal high-Z SNES/MD adapter read logic is unchanged.
+The path checks **5 V** at the physical MD slot. It deselects all
+other slot CE lines during the mapper transaction, but does **not**
+reject a valid MD-slot operation merely because SNES or another slot
+also contains a cartridge. No other write mode or address is allowed.
+The normal high-Z SNES/MD adapter read logic is unchanged.
 
 **Electrical risk:** Correct RAM, data-direction, and /RD /WR /CE
 timing cannot be proven from code or a successful ROM header probe.

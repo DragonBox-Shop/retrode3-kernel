@@ -566,8 +566,9 @@ failed:
  * A23 is SMS /RD (held HIGH), A22 is SMS /WR (pulsed LOW);
  * common OE drives the adapter's /CE while MD's own CE is Hi-Z.
  *
- * USB/Web autoprobe, other slots, 3.3V, other addresses, and ALL
- * other writes remain blocked. No cartridge game must be in another slot.
+ * USB/Web autoprobe, 3.3V, other addresses, and ALL other write
+ * modes remain blocked. Other populated slots are deselected below;
+ * their presence does not independently prohibit this MD-slot operation.
  * Requires oscilloscope validation before any live experimental use.
  */
 static ssize_t retrode3_sms_mapper_write(struct retrode3_slot *slot,
@@ -605,17 +606,6 @@ static ssize_t retrode3_sms_mapper_write(struct retrode3_slot *slot,
 	ret = gpiod_get_value(slot->cd);
 	if (ret <= 0)
 		return ret < 0 ? ret : -ENODEV;
-
-	/* Never enable writes with another cartridge fitted. */
-	for (i = 0; i < ARRAY_SIZE(bus->slots); i++) {
-		other = bus->slots[i];
-		if (!other || other == slot || other->is_controller ||
-		    IS_ERR_OR_NULL(other->cd))
-			continue;
-		ret = gpiod_get_value(other->cd);
-		if (ret != 0)
-			return ret < 0 ? ret : -EBUSY;
-	}
 
 	mutex_lock(&bus->select_lock);
 	/* Control lines idle, data inputs and MD CE inactive before setup. */
