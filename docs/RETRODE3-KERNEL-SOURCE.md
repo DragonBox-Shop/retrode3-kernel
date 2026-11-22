@@ -218,6 +218,31 @@ restoring the prior `uImage` via card reader straightforward. Do not
 treat a working boot with the existing module set as proof that a
 complete image or new module set has been hardware-tested.
 
+## Open hardware regression: cartridge status LEDs (2026-11-22)
+
+After booting the newly built `uImage`, the developer confirmed that
+both MegaDrive and SNES cartridge slots report `active`, with MD
+`3300mV` and SNES `fixed`, and the web UI detects the inserted games.
+USB networking also works at `172.31.255.1/30`. No kernel panic,
+Oops or BUG was reported in the supplied log grep.
+
+**Regression still to investigate:** the cartridge-associated LEDs
+continue blinking with the `heartbeat` trigger rather than remaining
+steadily lit for detected cartridges, as they did before swapping the
+kernel. The installed DTB was preserved and matches the integrated
+source byte-for-byte, and the original installed kernel module has not
+yet been replaced; therefore do **not** prematurely attribute the
+regression to our separately built `retrode3.ko`.
+
+The DTSI declares `linux,default-trigger = "heartbeat"` for the
+cartridge and controller LEDs and associates cartridge slots with
+`status-led` phandles. The integrated `retrode3_cart.c` has a
+TODO for automatically updating the status LED upon cartridge-sense
+changes. Verify running `/sys/class/leds/*/trigger`, any userspace
+udev/LED hooks, and the relationship between the original installed
+module and integrated driver source before changing code. A passing
+boot and cartridge-sense test alone does **not** approve the release.
+
 ## Reproducing the Oct 2026 kernel configuration
 
 On a Retrode3 with Nikolaus's installed Debian image:
