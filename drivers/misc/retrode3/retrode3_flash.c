@@ -41,7 +41,11 @@ static int retrode3_flash_word_command(struct retrode3_slot *slot,
 	struct retrode3_bus *bus = slot->bus;
 	int i, err = 0, cleanup;
 
-	gpiod_set_value(bus->oe, 1);
+	/* The oe-gpio is GPIO_ACTIVE_LOW: logical 0 means physical /OE HIGH.
+	 * The cartridge uses this level for the data translator direction
+	 * (host -> flash during writes). Logical 1 here would assert /OE
+	 * and can drive the data bus against the host during the command. */
+	gpiod_set_value(bus->oe, 0);
 	gpiod_set_value(bus->we->desc[0], 0);
 	gpiod_set_value(bus->we->desc[1], 0);
 	gpiod_set_value(slot->ce, 0);
@@ -159,7 +163,7 @@ static int retrode3_flash_cfi_query(struct retrode3_slot *slot,
 	if (err)
 		goto unlock;
 	/* Keep all chip selects inactive until address/data are safe. */
-	gpiod_set_value(bus->oe, 1);
+	gpiod_set_value(bus->oe, 0);
 	gpiod_set_value(bus->we->desc[0], 0);
 	gpiod_set_value(bus->we->desc[1], 0);
 	gpiod_set_value(bus->time, 0);
@@ -232,13 +236,13 @@ restore:
 	/* A reset is attempted after EVERY command attempt, including a
 	 * failed/partial CFI entry or failed read. Neither command depends
 	 * on the CFI response, and reset is always bounded to 0xF0. */
-	gpiod_set_value(bus->oe, 1);
+	gpiod_set_value(bus->oe, 0);
 	gpiod_set_value(bus->we->desc[0], 0);
 	gpiod_set_value(bus->we->desc[1], 0);
 	gpiod_set_value(slot->ce, 0);
 	if (command_attempted)
 		reset_err = retrode3_flash_word_command(slot, 0, 0x00f0);
-	gpiod_set_value(bus->oe, 1);
+	gpiod_set_value(bus->oe, 0);
 	gpiod_set_value(bus->we->desc[0], 0);
 	gpiod_set_value(bus->we->desc[1], 0);
 	gpiod_set_value(bus->time, 0);

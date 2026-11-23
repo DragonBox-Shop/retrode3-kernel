@@ -1,6 +1,25 @@
 # MegaDrive CFI bench on Retrode3 (Letux 7.3) - experimental
 
 **Branch:** `feature/md-flash-cfi-7.3` based on kernel `develop`,
+**Bus-direction fix (bench findings):** The DragonBox 4MB+RAM
+schematic (rev 2.0) uses 74LVC245 translators whose direction is
+controlled by the native MD `/OE` signal. The Retrode3's `oe` GPIO
+is declared active-low, so `gpiod_set_value(bus->oe, 1)` *asserts* physical
+`/OE` LOW; that is correct for neither the flash command phase nor
+post-write cleanup. It may enable cartridge output drivers while the
+Retrode3 also drives the data bus, and prevent CFI command acceptance.
+All four command/setup/restore `oe` assignments now use **logical 0**
+(physical `/OE` HIGH, inactive). Existing `read_word()` explicitly pulses
+physical `/OE` LOW only while sampling, then deasserts it.
+Do not test earlier CFI module versions again. This correction requires
+real-device verification before the bench can be considered safe.
+
+The uploaded `flashkit.c` from notaz confirms native x16 CFI command
+at **byte address 0xAA** and `QRY` reads from byte addresses
+**0x20, 0x22, 0x24**, matching the kernel transport. The board's U15 is
+**EN29LV320CB-70TIP**; 5 V at the MegaDrive connector is converted by
+**TLV70233** to 3.3 V for its flash and level shifters.
+
 including the merged GBx-0011 transport. The test adds an isolated
 `ioctl` for the **native 16-bit MegaDrive slot only**. It is not a
 write-cart release and is NOT used by ROM auto-detection.
