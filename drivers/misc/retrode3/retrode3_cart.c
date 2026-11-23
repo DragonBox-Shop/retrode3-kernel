@@ -1208,10 +1208,14 @@ static int retrode3_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
+/* Optional x16 MD CFI bench ioctl. See retrode3_flash_ioctl.h. */
+#include "retrode3_flash.c"
+
 static const struct file_operations slot_fops = {
 	.llseek		= retrode3_lseek,
 	.read		= retrode3_read,
 	.write		= retrode3_write,
+	.unlocked_ioctl	= retrode3_flash_ioctl,
 	.open		= retrode3_open,
 	.release	= retrode3_release,
 };
