@@ -215,10 +215,25 @@ static int r3_flash_validate_sector(u32 address, u32 *bytes)
     return 0;
 }
 
-static int r3_flash_erase_sector(struct retrode3_slot *slot,
+/* Only the FD that completed a matching CFI + ID check may write.
+ * The GPIO slot check still runs before EVERY destructive ioctl; any
+ * observed insertion/removal invalidates the authorization. */
+static int r3_flash_check_session(struct retrode3_file_context *ctx)
+{
+    struct retrode3_slot *slot = ctx->slot;
+
+    if (!ctx->flash_identified ||
+        ctx->flash_cd_epoch != atomic_read(&slot->cd_epoch)) {
+        ctx->flash_identified = false;
+        return -ENODEV;
+    }
+    return retrode3_flash_check_slot(slot);
+}
+
+static int r3_flash_erase_sector(struct retrode3_file_context *ctx,
                                  struct retrode3_flash_erase_v1 *request)
 {
-    struct retrode3_flash_id_v1 id = { 0 };
+    struct retrode3_slot *slot = ctx->slot;
     struct retrode3_bus *bus = slot->bus;
     u32 length;
     int err, reset_err;
@@ -227,19 +242,14 @@ static int r3_flash_erase_sector(struct retrode3_slot *slot,
     err = r3_flash_validate_sector(request->offset_bytes, &length);
     if (err)
         return err;
-    stage = "identify";
-    err = r3_flash_identify(slot, &id);
-    if (err) {
-        dev_warn(&slot->dev, "Flash erase: sector 0x%08x identify failed (%d)\n",
-                 request->offset_bytes, err);
-        return err;
-    }
+    /* Identity was established at the start of this open FD's session.
+     * No repeated CFI entry on each sector. */
     /* A concurrent short kernel-side bus operation is not a cartridge
      * fault. Wait for the mutex instead of spuriously failing mid-job. */
     if (mutex_lock_interruptible(&bus->select_lock))
         return -ERESTARTSYS;
-    stage = "slot-check";
-    err = retrode3_flash_check_slot(slot);
+    stage = "session-and-slot-check";
+    err = r3_flash_check_session(ctx);
     if (err)
         goto out;
     stage = "unlock";
@@ -286,10 +296,10 @@ out:
 
 /* The tiny kernel-side chunk keeps each ioctl bounded. Write each physical
  * word in x16 mode; no raw address/command write is exposed to userspace. */
-static int r3_flash_program(struct retrode3_slot *slot,
+static int r3_flash_program(struct retrode3_file_context *ctx,
                              struct retrode3_flash_program_v1 *request)
 {
-    struct retrode3_flash_id_v1 id = { 0 };
+    struct retrode3_slot *slot = ctx->slot;
     struct retrode3_bus *bus = slot->bus;
     u32 i;
     u16 target;
@@ -300,14 +310,13 @@ static int r3_flash_program(struct retrode3_slot *slot,
         (request->length & 1) || (request->offset_bytes & 1) ||
         request->offset_bytes > R3_FLASH_SIZE - request->length)
         return -EINVAL;
-    err = r3_flash_identify(slot, &id);
-    if (err)
-        return err;
+    /* Already identified on this open FD. Never repeat CFI for each
+     * 512-byte program chunk. An invalidated session must reprobe. */
     /* A concurrent short kernel-side bus operation is not a cartridge
      * fault. Wait for the mutex instead of spuriously failing mid-job. */
     if (mutex_lock_interruptible(&bus->select_lock))
         return -ERESTARTSYS;
-    err = retrode3_flash_check_slot(slot);
+    err = r3_flash_check_session(ctx);
     if (err)
         goto out;
 
