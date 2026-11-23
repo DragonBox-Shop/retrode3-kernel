@@ -275,13 +275,14 @@ unlock:
 static long retrode3_flash_ioctl(struct file *file, unsigned int cmd,
                                  unsigned long argument)
 {
-    struct retrode3_slot *slot = file->private_data;
+    struct retrode3_file_context *ctx = file->private_data;
+    struct retrode3_slot *slot = ctx->slot;
     struct retrode3_flash_cfi_query_v1 cfi;
     struct retrode3_flash_id_v1 id;
     struct retrode3_flash_erase_v1 erase;
     struct retrode3_flash_program_v1 program;
     void __user *arg = (void __user *)argument;
-    int ret;
+    int ret, original_epoch;
 
     if (cmd != RETRODE3_FLASH_IOC_CFI_QUERY &&
         cmd != RETRODE3_FLASH_IOC_IDENTIFY &&
@@ -309,18 +310,28 @@ static long retrode3_flash_ioctl(struct file *file, unsigned int cmd,
             return -EINVAL;
         memset(&id, 0, sizeof(id));
         id.abi_version = RETRODE3_FLASH_CFI_ABI_V1;
+        /* An IDENTIFY starts a fresh authorization on THIS file
+         * descriptor. A detect transition during CFI invalidates it. */
+        ctx->flash_identified = false;
+        original_epoch = atomic_read(&slot->cd_epoch);
         ret = r3_flash_identify(slot, &id);
         if (ret)
             goto fail;
+        if (original_epoch != atomic_read(&slot->cd_epoch)) {
+            ret = -ENODEV;
+            goto fail;
+        }
         if (copy_to_user(arg, &id, sizeof(id)))
             return -EFAULT;
+        ctx->flash_cd_epoch = original_epoch;
+        ctx->flash_identified = true;
         return 0;
     case RETRODE3_FLASH_IOC_ERASE:
         if (copy_from_user(&erase, arg, sizeof(erase)))
             return -EFAULT;
         if (erase.abi_version != RETRODE3_FLASH_CFI_ABI_V1 || erase.flags)
             return -EINVAL;
-        ret = r3_flash_erase_sector(slot, &erase);
+        ret = r3_flash_erase_sector(ctx, &erase);
         if (ret)
             goto fail;
         return 0;
@@ -329,7 +340,7 @@ static long retrode3_flash_ioctl(struct file *file, unsigned int cmd,
             return -EFAULT;
         if (program.abi_version != RETRODE3_FLASH_CFI_ABI_V1 || program.flags)
             return -EINVAL;
-        ret = r3_flash_program(slot, &program);
+        ret = r3_flash_program(ctx, &program);
         if (ret)
             goto fail;
         return 0;
