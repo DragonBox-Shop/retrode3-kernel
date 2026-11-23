@@ -213,13 +213,13 @@ int main(int argc, char **argv)
     unsigned long total = 0;
     const char *action;
 
-    if (argc < 3 || argc > 5) {
+    if (argc < 3 || argc > 4) {
         fprintf(stderr,
           "Usage: %s /dev/slot-md identify\n"
           "       %s /dev/slot-md verify /absolute/ROM.md\n"
-          "       %s /dev/slot-md write /absolute/ROM.md --confirm-erase\n"
-          "       %s /dev/slot-md erase /absolute/ROM.md --confirm-erase\n"
-          "Root only; 5V MD slot; dedicated disposable cart; external flock.\n",
+          "       %s /dev/slot-md write /absolute/ROM.md\n"
+          "       %s /dev/slot-md erase /absolute/ROM.md\n"
+          "MD slot at 5V; supported Flash cart; external flock.\n",
           argv[0], argv[0], argv[0], argv[0]);
         return 2;
     }
@@ -232,8 +232,8 @@ int main(int argc, char **argv)
             return err_message("verify requires exactly one ROM path");
     } else if (strcmp(action, "erase") == 0 ||
                strcmp(action, "write") == 0) {
-        if (argc != 5 || strcmp(argv[4], "--confirm-erase"))
-            return err_message("Destructive erase requires --confirm-erase");
+        if (argc != 4)
+            return err_message("erase/write require a ROM source path");
     } else {
         return err_message("Unknown Flash action");
     }
