@@ -6,7 +6,7 @@
  * This file is included by retrode3_cart.c inside the existing module.
  *
  * WARNING: 0x98 itself is a cartridge WRITE cycle. This opt-in diagnostic
- * must never be called by ROM auto-detection or on unknown 5-V adapters.
+ * must never be called by ROM auto-detection or on unknown adapters.
  */
 #include <linux/capability.h>
 #include <linux/ioctl.h>
@@ -74,15 +74,16 @@ out:
 }
 
 /*
- * Only a known native 16-bit MD socket, in 3.3-V mode, with a physically
- * present cartridge may enter the bench path. Do not turn this into an
+ * Only a known, console-compatible, native 16-bit MD Flash cart supplied
+ * with 5 V at the connector may enter the bench path. The Flash IC itself
+ * may run from 3.3 V through an onboard regulator. Do not turn this into an
  * automatic adapter-recognition mechanism. A second occupied cartridge,
  * FRAM mode, or either of the incompatible legacy/GBx experiments blocks it.
  */
 static int retrode3_flash_check_slot(struct retrode3_slot *slot)
 {
 	struct retrode3_bus *bus = slot->bus;
-	int i, present, voltage_direction;
+	int i, present, voltage_direction, power_level;
 
 	if (!of_device_is_compatible(slot->dev.of_node,
 			"openpandora,retrode3-slot-megadrive") ||
@@ -97,18 +98,28 @@ static int retrode3_flash_check_slot(struct retrode3_slot *slot)
 	    sms_mapper_write_test || slot->fram_mode)
 		return -EBUSY;
 
-	/* 3.3 V is selected by a floating power-control GPIO. A negative
-	 * gpiod_get_direction() result must NOT accidentally count as 3.3 V.
-	 * Never change the voltage inside a query operation. */
+	/* On this Retrode3 board, the native MD slot selects 5 V with the
+	 * power-control GPIO driven low (output direction, logical value 0).
+	 * This is connector voltage, not necessarily Flash IC VCC. Require
+	 * both properties; never switch voltage from the query ioctl. */
 	voltage_direction = gpiod_get_direction(slot->power);
 	if (voltage_direction < 0)
 		return voltage_direction;
-	if (voltage_direction != 1)
+	if (voltage_direction != 0)
+		return -EPERM;
+	power_level = gpiod_get_value(slot->power);
+	if (power_level < 0)
+		return power_level;
+	if (power_level != 0)
 		return -EPERM;
 
 	present = gpiod_get_value(slot->cd);
-	if (present <= 0)
+	if (present <= 0) {
+		dev_warn(&slot->dev,
+			 "CFI bench: MD cartridge detect not asserted (%d)\n",
+			 present);
 		return present < 0 ? present : -ENODEV;
+	}
 	for (i = 0; i < ARRAY_SIZE(bus->slots); i++) {
 		struct retrode3_slot *other = bus->slots[i];
 
@@ -176,6 +187,9 @@ static int retrode3_flash_cfi_query(struct retrode3_slot *slot,
 			goto restore;
 		}
 		if (value & 0xff00) {
+			dev_warn(&slot->dev,
+				 "CFI bench: high data lane at word 0x%02x: 0x%04x\n",
+				 i, (unsigned int)value);
 			err = -ENODEV;
 			goto restore;
 		}
@@ -184,6 +198,11 @@ static int retrode3_flash_cfi_query(struct retrode3_slot *slot,
 		    (reply->data[0x10] != 'Q' ||
 		     reply->data[0x11] != 'R' ||
 		     reply->data[0x12] != 'Y')) {
+			dev_warn(&slot->dev,
+				 "CFI bench: no QRY signature: %02x %02x %02x\n",
+				 (unsigned int)reply->data[0x10],
+				 (unsigned int)reply->data[0x11],
+				 (unsigned int)reply->data[0x12]);
 			err = -ENODEV;
 			goto restore;
 		}
@@ -192,6 +211,9 @@ static int retrode3_flash_cfi_query(struct retrode3_slot *slot,
 		 * return floating data; don't reject a valid flash for that. */
 		if (i == 0x2c) {
 			if (!reply->data[0x2c] || reply->data[0x2c] > 8) {
+				dev_warn(&slot->dev,
+					 "CFI bench: invalid erase-region count %u\n",
+				 (unsigned int)reply->data[0x2c]);
 				err = -ENODEV;
 				goto restore;
 			}
@@ -255,8 +277,10 @@ static long retrode3_flash_ioctl(struct file *file, unsigned int cmd,
 	memset(&data, 0, sizeof(data));
 	data.abi_version = RETRODE3_FLASH_CFI_ABI_V1;
 	ret = retrode3_flash_cfi_query(slot, &data);
-	if (ret)
+	if (ret) {
+		dev_warn(&slot->dev, "CFI bench: query failed (%d)\n", ret);
 		return ret;
+	}
 	if (copy_to_user(arg, &data, sizeof(data)))
 		return -EFAULT;
 	return 0;

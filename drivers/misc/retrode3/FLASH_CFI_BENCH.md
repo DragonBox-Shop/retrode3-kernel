@@ -8,7 +8,8 @@ write-cart release and is NOT used by ROM auto-detection.
 ## What the kernel can do
 
 When expressly enabled by root, and only for a present MD cartridge with
-no other occupied slot, it checks a reported 3.3 V supply, takes the
+no other occupied slot, it checks that the native MD connector is set to
+5 V, takes the
 driver's select mutex, issues **exactly one CFI query command**
 (`word 0x55 := 0x0098`), reads up to 128 x16 query words (low byte only),
 checks `QRY`, then writes `0x00F0` to word 0 for reset.
@@ -32,8 +33,13 @@ The existing GBx, SMS and normal ROM read/write paths are unchanged.
   with version 1 and zero flags.
 - MD slot with 16-bit data, correct compatible, data GPIOs and control
   pins must be present. Physical cartridge-detect must be active.
-- 3.3 V must already be selected, checked by exact GPIO direction 1,
-  not a negative error result; the ioctl never changes voltage.
+- 5 V must already be selected on the native MD connector (power GPIO
+  output low). Both direction and logical level are checked; negative
+  GPIO errors never count as a valid voltage. The ioctl never changes voltage.
+  This tests the voltage *selection*, not the actual measured VCC.
+  Native console-compatible Flash carts can contain 5-V Flash ICs or
+  3.3-V Flash ICs fed by an onboard regulator. Never apply 5 V directly
+  to a bare 3.3-V IC or non-console-compatible adapter.
 - A second populated cartridge blocks the operation.
 - Active GBx bench (including sticky `gbx_active`), SMS mapper bench,
   legacy bridge bench or Sonic 3 FRAM mode blocks the operation.
@@ -83,21 +89,31 @@ ${CROSS_COMPILE}gcc -std=gnu11 -O2 -Wall -Wextra -Werror \
 The `_IOWR` number is computed by the *target* system headers and must
 not be hardcoded from x86. Run the tool as root only after the test module
 is loaded, the exclusive shared bus lock is held, and the MD slot is
-manually set to 3.3 V:
+manually set to 5 V **only for a verified original-MegaDrive-compatible
+Flash cartridge**, with the other slots empty. Verify the actual supply
+and signal levels on the hardware before enabling the bench command:
 
 ```sh
-echo 1 > /sys/module/retrode3/parameters/flash_cfi_test
-./md_flash_cfi_bench /dev/slot-md
-echo 0 > /sys/module/retrode3/parameters/flash_cfi_test
+echo 5000 > /sys/class/retrode3/slot-md/vcc
+cat /sys/class/retrode3/slot-md/vcc  # expected selection: 5000mV
+(
+  trap 'echo 0 > /sys/module/retrode3/parameters/flash_cfi_test' EXIT
+  echo 1 > /sys/module/retrode3/parameters/flash_cfi_test
+  flock -n /run/lock/retrode3/bus.lock ./md_flash_cfi_bench /dev/slot-md
+)
+dmesg | tail -n 30
 ```
 
 If the `QRY` test fails or the CFI region sizes are inconsistent, stop:
-never attempt a fallback 5-V probe, generic bus writes or a Flash erase.
+inspect the new `CFI bench:` kernel diagnostics, then validate the bus
+waveforms and board-level power. Do not attempt generic bus writes or
+Flash erase; do not blindly retry at another voltage.
 
 ## Next acceptance stages
 
 1. Verify real waveforms and reset-to-array behavior with a known
-   EN29LV320CB Flash-cart, at 3.3 V, under the logic analyzer.
+   console-compatible EN29LV320CB Flash-cart, 5 V at the MD connector
+   and the correct regulated VCC at the Flash IC, under the logic analyzer.
 2. Report `QRY`, command set, interface width, size, erase regions and
    manufacturer/device IDs and compare against the existing FlashkitMD
    reference implementation and EN29LV320C datasheet.

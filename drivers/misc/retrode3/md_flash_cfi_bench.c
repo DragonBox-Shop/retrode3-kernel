@@ -32,7 +32,7 @@ int main(int argc, char **argv)
 
 	if (argc != 2) {
 		fprintf(stderr, "Usage: %s /dev/slot-md\n"
-			"BENCH ONLY: root + flash_cfi_test=1, 3.3V, "
+			"BENCH ONLY: root + flash_cfi_test=1, MD connector 5V, "
 			"one known flash cartridge, GBx off.\n", argv[0]);
 		return 2;
 	}
