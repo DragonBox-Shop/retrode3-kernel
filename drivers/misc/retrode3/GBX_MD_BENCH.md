@@ -90,6 +90,45 @@ GPIOs correlate with D7 we must revisit the physical wiring or input
 buffer direction rather than fabricating bit 7 in software. The
 checksum will still fail until the actual signal path is fixed.
 
+## GBA all-FF header investigation
+
+A real GBA cartridge now electrically activates the MD slot sense LED,
+but mode 24 (GBA low ROM window) returned only `FF` throughout the first
+192 bytes at 3.3 V. The sense LED is driven by the MD cartridge-detect
+GPIO independently of any successful GBA header identification.
+
+Original Sanni firmware `GameBoyAdvance::setROM()` waits **500 ms**
+after preparing the ROM bus, then `readWord()` drives AD address,
+asserts /CS_ROM, releases AD0..15, asserts /RD, samples 16-bit data,
+and returns the controls idle. Our normal GBA cycle already follows
+this order, but the all-FF result does not yet tell which phase fails.
+
+Experimental **mode 27**, read-only and 3.3 V only, records four
+16-bit `MD D0..D15` GPIO snapshots at one selected GBA word:
+1. while the multiplexed address is being driven and /CS is inactive
+2. address still driven, after /CS has been asserted
+3. after releasing all 16 data GPIOs to input, before /RD
+4. after /RD has been asserted and settled (should be ROM data)
+
+Each trace record is exactly eight bytes, little-endian: four `u16`
+samples. Seek offset `(GBA_byte_address / 2) * 8` in mode 27,
+limited to the first 256 GBA words. The operation is read-only, no
+/WR pulses, 3.3 V required. Diagnostic settle times are intentionally
+longer than normal ROM reads and do not change normal modes 24/25.
+
+In the OSCR GBx feature branch, the Python tester adds:
+
+```sh
+# Update both feature branches and load the newly compiled .ko
+# with gbx_md_test=1, arm with empty slot, then insert a GBA cart:
+python3 tools/gbx-md-hwtest.py gba --trace
+```
+
+The tester waits 500 ms before GBA reads, mirroring Sanni's initial
+setup delay. The trace distinguishes correct address drive and input
+release from a cartridge that does not drive the bus when /RD goes
+low. Do not conclude a specific missing signal from FF values alone.
+
 ## Device ABI (private experimental offsets)
 
 `pread` on `/dev/slot-md` with 64-bit offset
@@ -101,6 +140,7 @@ checksum will still fail until the actual signal path is fixed.
 | 24 | GBA ROM read, low window | 0..0xffffff |
 | 25 | GBA ROM read, high window | 0..0xffffff (physical +0x1000000) |
 | 26 | GB read-only GPIO pin snapshot, diagnostic only at 3.3 V | 0..0xffff (2 bytes per GB ROM address; A7..A18 => bits 0..11) |
+| 27 | GBA bus-stage trace, diagnostic only at 3.3 V | 0..0x7ff (8 bytes per GBA word, 4 x 16-bit samples) |
 
 The two GBA windows cover 32 MiB. Returned GBA bytes use little-endian
 word order, matching the stage-1 portable `gba_read16(byte_addr)`.
