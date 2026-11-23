@@ -145,15 +145,26 @@ static int r3_flash_wait_word(struct retrode3_slot *slot, u32 address,
                               u16 expected, unsigned timeout_ms)
 {
     unsigned long until = jiffies + msecs_to_jiffies(timeout_ms);
-    u16 value;
+    u16 previous, current;
     int err;
 
     do {
-        err = r3_flash_array_word(slot, address, &value);
+        /* DQ6 toggles while the EN29LV320C is busy. One coincidental
+         * read of expected data is not completion. Sample twice, then
+         * require both a stopped toggle bit AND exact array data. */
+        err = r3_flash_array_word(slot, address, &previous);
         if (err)
             return err;
-        if (value == expected)
-            return 0;
+        err = r3_flash_array_word(slot, address, &current);
+        if (err)
+            return err;
+        if (((previous ^ current) & BIT(6)) == 0) {
+            if (current == expected)
+                return 0;
+            /* Protected/failing sectors stop toggling without reaching
+             * the requested array value. No unsafe re-program retry. */
+            return -EIO;
+        }
         if (time_after_eq(jiffies, until))
             break;
         usleep_range(40, 80);
