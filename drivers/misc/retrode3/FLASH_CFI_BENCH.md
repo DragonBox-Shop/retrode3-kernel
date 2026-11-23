@@ -1,6 +1,9 @@
 # MegaDrive CFI bench on Retrode3 (Letux 7.3) - experimental
 
 **Branch:** `feature/md-flash-cfi-7.3` based on kernel `develop`,
+including the merged GBx-0011 transport. The test adds an isolated
+`ioctl` for the **native 16-bit MegaDrive slot only**. It is not a
+write-cart release and is NOT used by ROM auto-detection.
 
 **Bus-direction fix (bench findings):** The DragonBox 4MB+RAM
 schematic (rev 2.0) uses 74LVC245 translators whose direction is
