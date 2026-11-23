@@ -77,7 +77,7 @@ static int r3_flash_identify(struct retrode3_slot *slot,
         cfi.data[0x27] != 22 || cfi.data[0x2c] != 2 ||
         cfi.data[0x28] != 2 || cfi.data[0x29] != 0) {
         dev_warn(&slot->dev,
-                 "Flash ID: CFI table mismatch: len=%u cmd=%02x%02x size_exp=%u interface=%02x%02x regions=%u\\n",
+                 "Flash ID: CFI table mismatch: len=%u cmd=%02x%02x size_exp=%u interface=%02x%02x regions=%u\n",
                  cfi.query_bytes, cfi.data[0x14], cfi.data[0x13],
                  cfi.data[0x27], cfi.data[0x29], cfi.data[0x28],
                  cfi.data[0x2c]);
@@ -129,7 +129,7 @@ restore:
         if (((manufacturer & 0xff) != 0x7f &&
              (manufacturer & 0xff) != 0x1c) || device != 0x22f9) {
             dev_warn(&slot->dev,
-                     "Flash ID: unsupported manufacturer=%04x device=%04x (expected EN29LV320CB 22f9)\\n",
+                     "Flash ID: unsupported manufacturer=%04x device=%04x (expected EN29LV320CB 22f9)\n",
                      (unsigned int)manufacturer, (unsigned int)device);
             err = -ENODEV;
         }
