@@ -279,15 +279,6 @@ static long retrode3_flash_ioctl(struct file *file, unsigned int cmd,
         cmd != RETRODE3_FLASH_IOC_ERASE &&
         cmd != RETRODE3_FLASH_IOC_PROGRAM)
         return -ENOTTY;
-    if (!capable(CAP_SYS_RAWIO))
-        return -EPERM;
-    if (!READ_ONCE(flash_cfi_test))
-        return -EOPNOTSUPP;
-    if ((cmd == RETRODE3_FLASH_IOC_ERASE ||
-         cmd == RETRODE3_FLASH_IOC_PROGRAM) &&
-        !READ_ONCE(flash_write_test))
-        return -EOPNOTSUPP;
-
     switch (cmd) {
     case RETRODE3_FLASH_IOC_CFI_QUERY:
         if (copy_from_user(&cfi, arg, sizeof(cfi)))
