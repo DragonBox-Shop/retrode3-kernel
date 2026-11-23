@@ -261,32 +261,82 @@ unlock:
 	return err;
 }
 
-static long retrode3_flash_ioctl(struct file *file, unsigned int cmd,
-				 unsigned long argument)
-{
-	struct retrode3_slot *slot = file->private_data;
-	struct retrode3_flash_cfi_query_v1 data;
-	void __user *arg = (void __user *)argument;
-	int ret;
+#include "retrode3_flash_rw.c"
 
-	if (cmd != RETRODE3_FLASH_IOC_CFI_QUERY)
-		return -ENOTTY;
-	if (!capable(CAP_SYS_RAWIO))
-		return -EPERM;
-	if (!READ_ONCE(flash_cfi_test))
-		return -EOPNOTSUPP;
-	if (copy_from_user(&data, arg, sizeof(data)))
-		return -EFAULT;
-	if (data.abi_version != RETRODE3_FLASH_CFI_ABI_V1 || data.flags)
-		return -EINVAL;
-	memset(&data, 0, sizeof(data));
-	data.abi_version = RETRODE3_FLASH_CFI_ABI_V1;
-	ret = retrode3_flash_cfi_query(slot, &data);
-	if (ret) {
-		dev_warn(&slot->dev, "CFI bench: query failed (%d)\n", ret);
-		return ret;
-	}
-	if (copy_to_user(arg, &data, sizeof(data)))
-		return -EFAULT;
-	return 0;
+static long retrode3_flash_ioctl(struct file *file, unsigned int cmd,
+                                 unsigned long argument)
+{
+    struct retrode3_slot *slot = file->private_data;
+    struct retrode3_flash_cfi_query_v1 cfi;
+    struct retrode3_flash_id_v1 id;
+    struct retrode3_flash_erase_v1 erase;
+    struct retrode3_flash_program_v1 program;
+    void __user *arg = (void __user *)argument;
+    int ret;
+
+    if (cmd != RETRODE3_FLASH_IOC_CFI_QUERY &&
+        cmd != RETRODE3_FLASH_IOC_IDENTIFY &&
+        cmd != RETRODE3_FLASH_IOC_ERASE &&
+        cmd != RETRODE3_FLASH_IOC_PROGRAM)
+        return -ENOTTY;
+    if (!capable(CAP_SYS_RAWIO))
+        return -EPERM;
+    if (!READ_ONCE(flash_cfi_test))
+        return -EOPNOTSUPP;
+    if ((cmd == RETRODE3_FLASH_IOC_ERASE ||
+         cmd == RETRODE3_FLASH_IOC_PROGRAM) &&
+        !READ_ONCE(flash_write_test))
+        return -EOPNOTSUPP;
+
+    switch (cmd) {
+    case RETRODE3_FLASH_IOC_CFI_QUERY:
+        if (copy_from_user(&cfi, arg, sizeof(cfi)))
+            return -EFAULT;
+        if (cfi.abi_version != RETRODE3_FLASH_CFI_ABI_V1 || cfi.flags)
+            return -EINVAL;
+        memset(&cfi, 0, sizeof(cfi));
+        cfi.abi_version = RETRODE3_FLASH_CFI_ABI_V1;
+        ret = retrode3_flash_cfi_query(slot, &cfi);
+        if (ret)
+            goto fail;
+        if (copy_to_user(arg, &cfi, sizeof(cfi)))
+            return -EFAULT;
+        return 0;
+    case RETRODE3_FLASH_IOC_IDENTIFY:
+        if (copy_from_user(&id, arg, sizeof(id)))
+            return -EFAULT;
+        if (id.abi_version != RETRODE3_FLASH_CFI_ABI_V1 || id.flags)
+            return -EINVAL;
+        memset(&id, 0, sizeof(id));
+        id.abi_version = RETRODE3_FLASH_CFI_ABI_V1;
+        ret = r3_flash_identify(slot, &id);
+        if (ret)
+            goto fail;
+        if (copy_to_user(arg, &id, sizeof(id)))
+            return -EFAULT;
+        return 0;
+    case RETRODE3_FLASH_IOC_ERASE:
+        if (copy_from_user(&erase, arg, sizeof(erase)))
+            return -EFAULT;
+        if (erase.abi_version != RETRODE3_FLASH_CFI_ABI_V1 || erase.flags)
+            return -EINVAL;
+        ret = r3_flash_erase_sector(slot, &erase);
+        if (ret)
+            goto fail;
+        return 0;
+    case RETRODE3_FLASH_IOC_PROGRAM:
+        if (copy_from_user(&program, arg, sizeof(program)))
+            return -EFAULT;
+        if (program.abi_version != RETRODE3_FLASH_CFI_ABI_V1 || program.flags)
+            return -EINVAL;
+        ret = r3_flash_program(slot, &program);
+        if (ret)
+            goto fail;
+        return 0;
+    default:
+        return -ENOTTY;
+    }
+fail:
+    dev_warn(&slot->dev, "Flash bench ioctl 0x%x failed (%d)\n", cmd, ret);
+    return ret;
 }
