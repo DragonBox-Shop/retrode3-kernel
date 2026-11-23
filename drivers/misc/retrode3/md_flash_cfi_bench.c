@@ -49,7 +49,8 @@ int main(int argc, char **argv)
 	close(fd);
 	p = query.data;
 	if (query.abi_version != RETRODE3_FLASH_CFI_ABI_V1 ||
-	    query.query_bytes != RETRODE3_FLASH_CFI_QUERY_BYTES ||
+	    query.query_bytes < 0x2d ||
+	    query.query_bytes > RETRODE3_FLASH_CFI_QUERY_BYTES ||
 	    query.bus_width_bits != 16 ||
 	    p[0x10] != 'Q' || p[0x11] != 'R' || p[0x12] != 'Y') {
 		fprintf(stderr, "Invalid CFI response/ABI\n");
