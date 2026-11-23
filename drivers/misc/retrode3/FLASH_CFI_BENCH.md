@@ -1,9 +1,11 @@
-# MegaDrive CFI bench on Retrode3 (Letux 7.3) - experimental
+# MegaDrive experimental CFI / identify / erase / program / verify (Letux 7.3)
 
 **Branch:** `feature/md-flash-cfi-7.3` based on kernel `develop`,
-including the merged GBx-0011 transport. The test adds an isolated
-`ioctl` for the **native 16-bit MegaDrive slot only**. It is not a
-write-cart release and is NOT used by ROM auto-detection.
+including the merged GBx-0011 transport. The test adds dedicated
+`ioctl` operations for the **native 16-bit MegaDrive slot only**. Erase
+and program require a second opt-in, `flash_write_test=1`, and are
+**intended for hardware experiments now**, not for general release or
+automatic cartridge insertion detection.
 
 **Bus-direction fix (bench findings):** The DragonBox 4MB+RAM
 schematic (rev 2.0) uses 74LVC245 translators whose direction is
@@ -180,6 +182,111 @@ margins.
 **Not yet established:** measured electrical waveform/timing margin,
 manufacturer/device IDs, other Flash models, or safe erase/program
 behavior. Do not enable automatic detection or Write Cart yet.
+
+## Experimental destructive test build (not yet physically verified)
+
+The CFI and ROM-reset tests above are **physically accepted**. The
+following new operations have been implemented on this feature branch,
+but the updated kernel module has NOT yet been cross-compiled with the
+real MIPS Module.symvers or physically verified:
+
+- `RETRODE3_FLASH_IOC_IDENTIFY`: re-run CFI, issue AMD autoselect
+  (unlock addresses 0xAAA / 0x554, 0x90), read manufacturer/device IDs,
+  reset to ROM mode, require **Eon EN29LV320CB bottom boot** (Eon 0x7F
+  or 0x1C / device 0x22F9) and the tested 8x8KiB + 63x64KiB geometry.
+- `RETRODE3_FLASH_IOC_ERASE`: erase one explicitly supplied aligned
+  sector using AMD unlock/0x80/unlock/0x30; wait for completion with a
+  bounded timeout and scan the entire sector to verify 0xFFFF.
+- `RETRODE3_FLASH_IOC_PROGRAM`: write 2..512 bytes of MegaDrive-order
+  ROM data, validate 1-to-0 transitions and poll/read back each word.
+  Every call revalidates chip ID/geometry and the MD slot voltage.
+- `md_flash_rw_bench.c`: operator-only identify, erase, write,
+  standalone verify, automatically verified write, and phase progress.
+
+Only an explicitly armed **root** process with CAP_SYS_RAWIO can use the
+ioctls, and the original CFI gate and additional destructive gate are
+both OFF by default. **The new test capabilities are callable immediately
+after building**, without requiring the physical test results in advance.
+They must not be included or enabled in the ordinary release until tested.
+
+### Crossbuild on Arch / Podman
+
+Update the prepared source tree to this feature-branch head (no tags),
+mount it in the existing Podman MIPS builder, and build ONLY the module.
+The exact toolchain prefix must match the installed builder, not a guessed
+host MIPS prefix. The C bench uses the same cross compiler:
+
+```sh
+${CROSS_COMPILE}gcc -std=gnu11 -O2 -Wall -Wextra -Werror -pedantic \
+  -Idrivers/misc/retrode3 \
+  drivers/misc/retrode3/md_flash_rw_bench.c -o md_flash_rw_bench
+```
+
+Transfer under a **new** test name (do not overwrite the installed module),
+unload the previous experiment with carts removed, and insmod the new module
+only after verifying matching vermagic. Ensure no background Web read jobs
+are running, all other slots empty, the known disposable DragonBox MD cart
+inserted, and MD slot VCC set to 5000mV. The existing sysfs `vcc` value
+reports the voltage selection, not a physical meter reading.
+
+### First: test identification without erasing
+
+```sh
+echo 5000 > /sys/class/retrode3/slot-md/vcc
+(
+  trap 'echo 0 > /sys/module/retrode3/parameters/flash_cfi_test' EXIT
+  echo 1 > /sys/module/retrode3/parameters/flash_cfi_test
+  flock -n /run/lock/retrode3/bus.lock \
+    /root/md_flash_rw_bench /dev/slot-md identify
+)
+dmesg | tail -n 35
+```
+
+Expected Eon manufacturer 0x007f (or 0x001c), device 0x22f9 and 4MiB
+capacity, 71 sectors. Stop on any other ID or kernel warning. Flash writes
+MUST use the known disposable cart, its ROM backup, correctly measured
+voltage and deliberate user consent.
+
+### Optional destructive experiments on the disposable cart
+
+Here `/root/test-game.md` is an **existing regular ROM file** of even
+length 512..4194304 bytes, already backed up, not a device or symlink.
+The shared bus lock must cover the ENTIRE job. The tester chooses and
+confirms the actual file path before running. Erasing destroys the
+existing contents of every sector touched by the input image.
+
+```sh
+(
+  trap 'echo 0 > /sys/module/retrode3/parameters/flash_write_test; echo 0 > /sys/module/retrode3/parameters/flash_cfi_test' EXIT
+  echo 1 > /sys/module/retrode3/parameters/flash_cfi_test
+  echo 1 > /sys/module/retrode3/parameters/flash_write_test
+  flock -n /run/lock/retrode3/bus.lock \
+    /root/md_flash_rw_bench /dev/slot-md write \
+      /root/test-game.md --confirm-erase
+)
+```
+
+The tool emits `erase`, `program` and `verify` progress only from
+completed sectors / confirmed program chunks / bytes compared. A failed
+write or mismatch returns nonzero and the cart must be treated as partially
+written. To verify without erasing/programming:
+
+```sh
+(
+  trap 'echo 0 > /sys/module/retrode3/parameters/flash_cfi_test' EXIT
+  echo 1 > /sys/module/retrode3/parameters/flash_cfi_test
+  flock -n /run/lock/retrode3/bus.lock \
+    /root/md_flash_rw_bench /dev/slot-md verify /root/test-game.md
+)
+```
+
+**Known limitations:** This first stage exposes real operations in the
+experiment, but it is *not yet wired through the shared dynamic CLI core
+or the Web Write Cartridge UI*. `md_flash_rw_bench` is the temporary
+standalone hardware acceptance client. The kernel's polling timings,
+erase/program execution and complete readback still need physical
+acceptance; the host-side C tool syntax/confirmation check alone is NOT
+a kernel compile test. Do not promote to `develop` or `master` yet.
 
 ## Next acceptance stages
 
