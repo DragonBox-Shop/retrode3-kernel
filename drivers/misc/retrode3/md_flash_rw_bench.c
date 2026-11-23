@@ -178,7 +178,6 @@ static int do_verify(int slotfd, int srcfd, unsigned long total)
     while (pos < total) {
         size_t n = total - pos > sizeof(expected) ?
                    sizeof(expected) : (size_t)(total - pos);
-        size_t got = 0;
         ssize_t r;
         unsigned long j;
 
@@ -187,17 +186,11 @@ static int do_verify(int slotfd, int srcfd, unsigned long total)
         r = pread(srcfd, expected, n, (off_t)pos);
         if (r != (ssize_t)n)
             return err_message("Source ROM unreadable during verification");
-        while (got < n) {
-            /* Keep the buffer bound explicit for fortified libc/GCC.
-             * The physical slot may legally return short reads. */
-            if (got >= sizeof(actual) || n > sizeof(actual))
-                return err_message("Invalid cartridge readback buffer length");
-            r = pread(slotfd, actual + got, n - got,
-                      (off_t)(pos + got));
-            if (r <= 0)
-                return err_sys("Cartridge readback failed");
-            got += (size_t)r;
-        }
+        /* The native MD char-device reader returns requested contiguous
+         * blocks; reject a short read rather than silently accepting it. */
+        r = pread(slotfd, actual, n, (off_t)pos);
+        if (r != (ssize_t)n)
+            return err_message("Short/failed cartridge readback");
         for (j = 0; j < n; j++) {
             if (expected[j] != actual[j]) {
                 fprintf(stderr,
