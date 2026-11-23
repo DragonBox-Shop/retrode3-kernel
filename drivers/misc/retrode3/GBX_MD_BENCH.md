@@ -1,9 +1,29 @@
 # Retrode2 GBx-0011 MD-slot kernel bench (Letux 7.3)
 
-Status: **source-only**, hardware build and electrical/ROM tests pending.
+Status: **manual GB and GBA ROM-header probes passed on real Retrode3 hardware at 3.3 V**. Full ROM dumps, MBC bank switching, GBC-specific behavior, electrical validation, and production integration remain pending.
 Branch: `feature/gbx-md-read-7.3` on `DragonBox-Shop/retrode3-kernel`.
 Stage-1 portable reader is in `retrode3-oscr` branch
 `feature/gbx-retrode2-md-transport`.
+
+## Verified physical header results (2026-11-23)
+
+* GB/GBC transport mode 23: actual **PINBALL** cartridge returned the same
+  valid Nintendo-logo/header bytes and GB header checksum on two independent
+  consecutive `python3 tools/gbx-md-hwtest.py gb --raw` runs. Reported
+  `title='PINBALL' type=01 ROM=01 RAM=00` (MBC1, 64 KiB ROM, no RAM).
+* GBA transport mode 24: actual **SHININGFORCE** cartridge returned a valid
+  Nintendo-logo sum and GBA header checksum on
+  `python3 tools/gbx-md-hwtest.py gba --raw` at 3.3 V.
+  Reported `title='SHININGFORCE' game_code=AF5P`; GBA header began
+  `2E 00 00 EA 24 FF AE 51` and contained title bytes at `0x00A0`.
+* GBA address-latch bug was traced to a uniform +1 mismatch between the
+  GBx adapter's MD A-pin labels and the Retrode3 host `addr-gpios[]`
+  indices. After correcting **both** data and control signal indexes
+  (and releasing the IRQ/audio GPIO), the GBA header passes.
+* **Not yet established:** complete and reproducible GBA ROM dumping,
+  successful GB MBC bank switching, GB/GBA electrical oscilloscope checks,
+  independent GB regression **after the final control-line remap**,
+  GBC-only behavior, and normal system regression. Keep on feature branches.
 
 ## Intended physical test
 
