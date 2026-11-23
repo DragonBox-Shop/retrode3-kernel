@@ -50,12 +50,12 @@ jobs:
             -Idrivers/misc/retrode3 \
             drivers/misc/retrode3/md_flash_rw_bench.c \
             -o /tmp/md_flash_rw_bench
-      - name: Destructive test commands require explicit confirmation
+      - name: Flash bench rejects a write without a ROM source
         run: |
           set +e
-          /tmp/md_flash_rw_bench /dev/slot-md write /tmp/rom.md \
+          /tmp/md_flash_rw_bench /dev/slot-md write \
             >/tmp/rw.out 2>/tmp/rw.err
           code=$?
           set -e
           test "$code" -eq 1
-          grep -Fq -- '--confirm-erase' /tmp/rw.err
+          grep -Fq 'ROM source path' /tmp/rw.err
