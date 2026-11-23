@@ -18,26 +18,32 @@
  */
 
 /*
- * MD-slot GPIO indices and GBx control lines (active LOW).
+ * GBx-0011 adapter signal GPIO indexes on the Retrode3 host.
  *
- * First physical GB read: all 48 Nintendo-logo bytes were EXACTLY
- * (expected << 1) & 0xff. In this driver, sampling addr GPIOs 8..15
- * therefore returned GB D0 on bit 1 and never sampled GB D7.
- * The experimentally indicated 8-bit window is addr GPIOs 9..16.
- * This is a bench hypothesis, not a finalized hardware pinout.
+ * The schematic's MD A8..A15 GB data window was experimentally seen
+ * on addr-gpios[9..16], one GPIO higher. A GB header became fully
+ * valid after fixing that window. GBA data then followed the ROM's
+ * sequential counter rather than honoring random addresses, strongly
+ * suggesting that the same +1 discrepancy affects MD control pins:
+ * former "CS" GPIO3 was the physical /RD, while physical /CS (GPIO4)
+ * was previously held permanently low.
+ *
+ * Apply +1 to ALL MD address-side adapter pin indexes for this
+ * operator-only bench. The shift is not yet electrically confirmed
+ * against the adapter/host schematic; do not promote to production.
  */
 #define GBX_HIGH_DATA_FIRST 9
 #define GBX_HIGH_DATA_LAST  16
-#define GBX_DIAG_FIRST      7
+#define GBX_DIAG_FIRST      8
 #define GBX_DIAG_LAST       18
 
-/* MD edge address lines used as GBx control signals (active LOW). */
-#define GBX_RD     2
-#define GBX_CS_ROM 3
-#define GBX_CS_RAM 5 /* GB reset, GBA RAM select: idle HIGH */
-#define GBX_WR     6
-#define GBX_CLK   20
-#define GBX_AUDIO_IRQ 19
+/* GBx physical adapter pins, mapped onto Retrode3 addr-gpios indexes. */
+#define GBX_RD        3  /* adapter MD A2, GBA ROM /RD */
+#define GBX_CS_ROM    4  /* adapter MD A3, GBA address latch /CS */
+#define GBX_CS_RAM    6  /* adapter MD A5, GBA RAM select / GB reset */
+#define GBX_WR        7  /* adapter MD A6: ALWAYS HIGH (no writes) */
+#define GBX_CLK      21  /* adapter MD A20, safe low clock */
+#define GBX_AUDIO_IRQ 20 /* adapter MD A19, MUST be input */
 
 static bool retrode3_gbx_md_slot(struct retrode3_slot *slot)
 {
@@ -87,30 +93,28 @@ static int retrode3_gbx_prepare(struct retrode3_bus *bus, bool gba)
 	ret = gpiod_direction_output(bus->addrs->desc[GBX_CS_RAM], 1);
 	if (ret) return ret;
 
-	/* The GBx adapter does not use the remaining MD/N64-only pins. */
+	/*
+	 * Remaining unpopulated MD/N64-only pins can idle at 0.
+	 * A8..A20 stay Hi-Z whenever not actively driving GBA
+	 * upper addresses; A20 is the GB audio / GBA IRQ output.
+	 */
 	for (i = 0; i < bus->addrs->ndescs; ++i) {
 		if (i == GBX_RD || i == GBX_CS_ROM ||
 		    i == GBX_WR || i == GBX_CS_RAM ||
-		    i == GBX_AUDIO_IRQ ||
-		    (i >= GBX_DIAG_FIRST && i <= GBX_DIAG_LAST))
+		    (i >= GBX_DIAG_FIRST && i <= GBX_AUDIO_IRQ))
 			continue;
 		ret = gpiod_direction_output(bus->addrs->desc[i], 0);
-		if (ret) return ret;
+		if (ret)
+			return ret;
 	}
 	/* Clock idles low for this read-only header/ROM transport. */
 	set_bus_bit(bus->addrs->desc[GBX_CLK], 0);
 
 	/*
-	 * Do not drive GPIO A16 as a normal MD address: on the GBx
-	 * physical test the highest GB data bit appears to be here.
-	 * A8 remains INPUT/Hi-Z. On GBA, A9..A16 drive the eight
-	 * upper address bits; on GB the same GPIOs sample D0..D7.
+	 * GB data bits 0..7 or GBA upper address bits 16..23 live
+	 * on GPIO 9..16. Other GPIOs 8..20 remain inputs/Hi-Z.
 	 */
-	/*
-	 * A7/A8 and A17/A18 stay Hi-Z for diagnostic sampling. They
-	 * must not accidentally drive an unknown GBx data connection.
-	 */
-	for (i = GBX_DIAG_FIRST; i <= GBX_DIAG_LAST; ++i) {
+	for (i = GBX_DIAG_FIRST; i <= GBX_AUDIO_IRQ; ++i) {
 		if (i >= GBX_HIGH_DATA_FIRST && i <= GBX_HIGH_DATA_LAST &&
 		    gba)
 			ret = gpiod_direction_output(bus->addrs->desc[i], 0);
@@ -148,9 +152,10 @@ static int retrode3_gbx_gb_read8(struct retrode3_bus *bus, u16 addr)
 
 
 /*
- * Bench-only GB pin snapshot. For one ROM address, return bits 0..11
- * describing INPUT GPIOs MD A7..A18 while the cartridge /RD is active.
- * This identifies where the missing GB data bit 7 physically appears.
+ * Bench-only GB pin snapshot. For one ROM address, return bits 0..10
+ * describing INPUT GPIOs addr-gpios A8..A18 while /RD is active.
+ * The prior 12-bit A7..A18 diagnostic included physical /WR at GPIO7,
+ * which must now remain driven HIGH at all times.
  * Do not expose this mode in a normal cartridge core / web interface.
  */
 static int retrode3_gbx_gb_pins(struct retrode3_bus *bus, u16 addr)
@@ -370,18 +375,17 @@ static ssize_t retrode3_gbx_read(struct retrode3_slot *slot,
 	err = 0;
 out:
 	/*
-	 * Leave ALL shared GB data/GBA upper-address lines in high-Z after
-	 * every call. In particular the empty-bus arm uses a GBA cycle;
-	 * without releasing A16 it could contend with GB cartridge D7
-	 * when the user inserts the cartridge after arming.
-	 * Do not restore normal MD address outputs while GBx is armed.
+	 * Leave ALL shared GB data/GBA upper-address lines and GPIO20
+	 * (cart audio/IRQ) high-Z after every operation, including arm.
+	 * Keep /WR inactive HIGH and do not restore normal MD address
+	 * outputs while the GBx bench is armed.
 	 */
 	retrode3_gbx_idle(bus);
 	end_drive_word(bus);
 	{
 		int pin;
 
-		for (pin = GBX_DIAG_FIRST; pin <= GBX_DIAG_LAST; ++pin)
+		for (pin = GBX_DIAG_FIRST; pin <= GBX_AUDIO_IRQ; ++pin)
 			gpiod_direction_input(bus->addrs->desc[pin]);
 	}
 	bus->current_addr = EOF - 1;
