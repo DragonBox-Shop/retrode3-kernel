@@ -100,6 +100,42 @@ and the existing Verify result is known. The new throughput and bypass
 exit behavior still require MIPS/kernel and cartridge tests. The
 host-side syntax CI compiles only a userspace bench, **not the kernel**.
 
+## Separate program status from full Verify; improve ROM-read copies
+
+The first implementation did two different reads **inside every word
+program operation**: an old-array-data read to test 1-to-0 programming,
+and repeated array/status sampling to check command completion. This
+was mistaken for a full Verify in the Write stage.
+
+The old-array-data read and per-word content equality check are now
+removed. The embedded program still **must finish** before the next
+word command: the driver polls DQ6, checks DQ5 for timeouts and rechecks
+DQ6 on a possible DQ5 race, following the vendor's status algorithm.
+No complete ROM comparison runs in the Program stage. The fast word
+poll no longer sleeps for 40-80 us each iteration. **Verify**, when
+requested, still reads the entire image only after all programming
+finishes, with the selected number of passes.
+
+The ordinary MD-ROM `read()` path also supplies Flash readback and
+Verify. It toggles /OE and samples 16 individual data GPIOs per word.
+If `CONFIG_RETRODE3_BUFFER` was *off*, the old driver additionally did
+one `copy_to_user()` for every 2-byte word. The new MD-ROM-only fallback
+reads exactly the same bus words and performs the same /OE timing, but
+copies a complete 1024-byte block at a time. When
+`CONFIG_RETRODE3_BUFFER=y`, the existing buffered route is unchanged.
+No SNES/NES/GBx/FRAM logic is touched.
+
+Further GPIO bus-speed candidates are GPIO-chip `get_multiple` and
+retaining data-direction configuration during adjacent Flash command
+cycles. Both require explicit electrical and hardware throughput tests
+before using them; the data GPIOs may span multiple SoC banks. The
+512-byte program ioctl currently also re-identifies the chip before
+each chunk, contributing extra CFI/autoselect overhead.
+
+**Status:** this update requires a new module-only cross-build and
+device tests. Host-side Flash bench CI alone does not validate the
+kernel build, real throughput or GPIO read parity with prior ROM dumps.
+
 ## MIPS module-only build
 
 Use the existing Arch/Podman MIPS builder and the prepared
