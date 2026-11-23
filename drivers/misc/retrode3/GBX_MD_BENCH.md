@@ -129,6 +129,55 @@ setup delay. The trace distinguishes correct address drive and input
 release from a cartridge that does not drive the bus when /RD goes
 low. Do not conclude a specific missing signal from FF values alone.
 
+## Critical follow-up from GBA random-address trace (23 Nov 2026)
+
+The 3.3-V GBA trace showed real ROM words (Nintendo logo), but
+read requests `0x0000` and `0x00A0` returned different values on
+repetition, consistent with the GBA ROM's automatic sequential address
+counter advancing while new addresses were not latched. The sampled
+data before/after the driver's supposed /RD assertion were identical.
+
+A common cause fits **both** the previously successful GB experiment
+and the GBA failure: the GB data bus was offset by **+1 in the host's
+`addr-gpios[]` indexes** relative to the adapter's MD A-numbering.
+The prior driver only shifted GB data pins, leaving the other control
+pins uncorrected. If the same offset applies to ALL address pins:
+- former `GPIO3` used for /CS_ROM was actually physical **/RD**;
+- physical **/CS_ROM** was `GPIO4`, which was continuously driven LOW
+  by the "unused pin" setup. GBA therefore never got a fresh
+  address-latch edge and continued reading sequential words;
+- physical **/WR** is `GPIO7`, previously set to INPUT during the
+  GB diagnostic (must remain HIGH for ROM reads);
+- physical **GB audio/GBA IRQ** is `GPIO20`, previously driven LOW
+  as the supposed clock (must instead be INPUT/Hi-Z);
+- physical clock is `GPIO21`, now driven to a defined LOW idle.
+
+**STOP using any previously compiled GBx test module** until this
+full control-line correction is compiled, loaded with the adapter and
+cartridge removed, and verified. The new mapping is still a
+**hypothesis inferred from electrical ROM data** and should be
+checked against actual PCB/host wiring or with a logic analyzer.
+Never change the general MD Device Tree to compensate; the shift
+belongs to this adapter's bench mapping.
+
+New experimental controls in `retrode3_gbx.c` are:
+`/RD=3`, `/CS_ROM=4`, `/CS_RAM=6`, `/WR=7` kept
+HIGH, `audio/IRQ=20` INPUT, `clock=21` LOW, and
+`data/upper-address=9..16`. Mode 26's optional pin snapshot
+now spans `GPIO8..GPIO18`, since GPIO7 must not be turned into
+an input. All shared `GPIO8..GPIO20` lines are released after
+each bus operation. Normal GB/GBA modes, voltages, cart writes
+and other existing slot drivers are otherwise unchanged.
+
+For the **next test**, remove the GBx adapter/cartridge before
+unloading the old module; build and stage the new `.ko` under a
+fresh name; with an empty adapter/slot, load it with
+`gbx_md_test=1` and run `arm` before inserting a GBA cart. Start
+with `python3 tools/gbx-md-hwtest.py gba --raw`, which remains at
+3.3 V and reads only 192 bytes of the header. If this fails, avoid
+full ROM dumping and inspect the new trace. Then reconfirm GB with
+a separate header-only 3.3 V run after a clean arm step.
+
 ## Device ABI (private experimental offsets)
 
 `pread` on `/dev/slot-md` with 64-bit offset
@@ -139,7 +188,7 @@ low. Do not conclude a specific missing signal from FF values alone.
 | 23 | GB/GBC ROM read 8-bit | 0..0x7fff |
 | 24 | GBA ROM read, low window | 0..0xffffff |
 | 25 | GBA ROM read, high window | 0..0xffffff (physical +0x1000000) |
-| 26 | GB read-only GPIO pin snapshot, diagnostic only at 3.3 V | 0..0xffff (2 bytes per GB ROM address; A7..A18 => bits 0..11) |
+| 26 | GB read-only GPIO pin snapshot, diagnostic only at 3.3 V | 0..0xffff (2 bytes per GB ROM address; A8..A18 => bits 0..10) |
 | 27 | GBA bus-stage trace, diagnostic only at 3.3 V | 0..0x7ff (8 bytes per GBA word, 4 x 16-bit samples) |
 
 The two GBA windows cover 32 MiB. Returned GBA bytes use little-endian
