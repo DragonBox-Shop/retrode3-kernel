@@ -23,13 +23,17 @@
  * sampled during a GB /RD cycle at ROM offset (byte_offset >> 1).
  * Kernel requires 3.3V for this mode. */
 #define RETRODE3_GBX_MD_GB_PINSCAN     26U
+/* GBA bus diagnosis: each 8-byte record = 4 x u16 data GPIO snapshots,
+ * keyed by (GBA byte address / 2) * 8. Root-only bench, 3.3V only. */
+#define RETRODE3_GBX_MD_GBA_TRACE      27U
 
 static inline int retrode3_gbx_mode_is_read(unsigned int mode)
 {
     return mode == RETRODE3_GBX_MD_GB_READ8 ||
            mode == RETRODE3_GBX_MD_GBA_READ16_LO ||
            mode == RETRODE3_GBX_MD_GBA_READ16_HI ||
-           mode == RETRODE3_GBX_MD_GB_PINSCAN;
+           mode == RETRODE3_GBX_MD_GB_PINSCAN ||
+           mode == RETRODE3_GBX_MD_GBA_TRACE;
 }
 
 static inline int retrode3_adapter_mode_is_read(unsigned int mode)
