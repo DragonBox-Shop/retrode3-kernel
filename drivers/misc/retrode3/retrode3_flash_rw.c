@@ -169,8 +169,11 @@ static int r3_flash_wait_word(struct retrode3_slot *slot, u32 address,
         if (((previous ^ sample) & BIT(6)) == 0) {
             if (sample == expected)
                 return 0;
-            /* Protected/failing sectors stop toggling without reaching
-             * the requested array value. No unsafe re-program retry. */
+            dev_warn(&slot->dev,
+                     "Flash poll: stable DQ6, unexpected data at 0x%08x: first=%04x next=%04x expected=%04x DQ5=%u\n",
+                     address, (unsigned int)previous,
+                     (unsigned int)sample, (unsigned int)expected,
+                     !!(sample & BIT(5)));
             return -EIO;
         }
         if (time_after_eq(jiffies, until))
@@ -178,6 +181,11 @@ static int r3_flash_wait_word(struct retrode3_slot *slot, u32 address,
         usleep_range(40, 80);
         cond_resched();
     } while (1);
+    dev_warn(&slot->dev,
+             "Flash poll: timeout at 0x%08x: first=%04x next=%04x expected=%04x DQ5=%u\n",
+             address, (unsigned int)previous,
+             (unsigned int)sample, (unsigned int)expected,
+             !!(sample & BIT(5)));
     return -ETIMEDOUT;
 }
 
@@ -203,45 +211,60 @@ static int r3_flash_erase_sector(struct retrode3_slot *slot,
     struct retrode3_flash_id_v1 id = { 0 };
     struct retrode3_bus *bus = slot->bus;
     u32 length, offset;
-    u16 word;
+    u16 word = 0;
     int err, reset_err;
+    const char *stage = "validate-sector";
 
     err = r3_flash_validate_sector(request->offset_bytes, &length);
     if (err)
         return err;
+    stage = "identify";
     err = r3_flash_identify(slot, &id);
-    if (err)
+    if (err) {
+        dev_warn(&slot->dev, "Flash erase: sector 0x%08x identify failed (%d)\n",
+                 request->offset_bytes, err);
         return err;
+    }
     if (!mutex_trylock(&bus->select_lock))
         return -EBUSY;
+    stage = "slot-check";
     err = retrode3_flash_check_slot(slot);
     if (err)
         goto out;
+    stage = "unlock";
     err = r3_flash_unlock(slot);
     if (err)
         goto reset;
+    stage = "erase-setup";
     err = retrode3_flash_word_command(slot, 0xaaa, 0x0080);
     if (err)
         goto reset;
+    stage = "erase-unlock";
     err = r3_flash_unlock(slot);
     if (err)
         goto reset;
+    stage = "erase-command";
     err = retrode3_flash_word_command(slot, request->offset_bytes, 0x0030);
     if (err)
         goto reset;
 
     /* Sector erase can be much slower than program. Poll the last word
      * and then independently check EVERY word is really erased. */
+    stage = "poll";
     err = r3_flash_wait_word(slot, request->offset_bytes + length - 2,
                              0xffff, 60000);
     if (err)
         goto reset;
+    stage = "verify-sector";
     for (offset = request->offset_bytes;
          offset < request->offset_bytes + length; offset += 2) {
         err = r3_flash_array_word(slot, offset, &word);
         if (err)
             goto reset;
         if (word != 0xffff) {
+            dev_warn(&slot->dev,
+                     "Flash erase: nonempty word at 0x%08x: %04x\n",
+                     offset, (unsigned int)word);
             err = -EIO;
             goto reset;
         }
@@ -258,6 +281,10 @@ reset:
     gpiod_set_value(slot->ce, 0);
     retrode3_flash_release_data(bus);
 out:
+    if (err)
+        dev_warn(&slot->dev,
+                 "Flash erase: sector 0x%08x failed at %s (%d)\n",
+                 request->offset_bytes, stage, err);
     mutex_unlock(&bus->select_lock);
     return err;
 }
