@@ -188,6 +188,10 @@ static int do_verify(int slotfd, int srcfd, unsigned long total)
         if (r != (ssize_t)n)
             return err_message("Source ROM unreadable during verification");
         while (got < n) {
+            /* Keep the buffer bound explicit for fortified libc/GCC.
+             * The physical slot may legally return short reads. */
+            if (got >= sizeof(actual) || n > sizeof(actual))
+                return err_message("Invalid cartridge readback buffer length");
             r = pread(slotfd, actual + got, n - got,
                       (off_t)(pos + got));
             if (r <= 0)
