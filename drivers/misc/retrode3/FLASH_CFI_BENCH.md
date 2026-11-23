@@ -164,16 +164,29 @@ The successful result followed correction of the active-low `/OE`
 polarity in the Flash write/cleanup path. Previous bench module
 versions must not be reused.
 
-**Not yet established:** verified reset-to-array readback after query,
-measured electrical waveform/timing margin, read/manufacturer device IDs,
-other Flash models, or safe erase/program behavior. Do not enable
-automatic detection or Write Cart yet.
+**Post-query ROM-read check passed (2026-11-23).** The operator held the
+shared bus lock and read 16 bytes starting at MD ROM byte offset `0x100`
+after the completed CFI ioctl:
+
+```text
+SEGA GENESIS
+```
+
+This confirms the tested cartridge was back in normal ROM read mode
+for the standard MegaDrive header after the CFI reset command. It does
+not verify every address, erase/program safety, or the physical timing
+margins.
+
+**Not yet established:** measured electrical waveform/timing margin,
+manufacturer/device IDs, other Flash models, or safe erase/program
+behavior. Do not enable automatic detection or Write Cart yet.
 
 ## Next acceptance stages
 
-1. Verify real waveforms and reset-to-array behavior with a known
-   console-compatible EN29LV320CB Flash-cart, 5 V at the MD connector
-   and the correct regulated VCC at the Flash IC, under the logic analyzer.
+1. Verify physical waveforms and voltage margins (including reset-cycle
+   timing) with a known console-compatible EN29LV320CB Flash-cart, 5 V
+   at the MD connector and the correct regulated VCC at the Flash IC,
+   under the logic analyzer. Normal ROM readback after reset has passed.
 2. Report `QRY`, command set, interface width, size, erase regions and
    manufacturer/device IDs and compare against the existing FlashkitMD
    reference implementation and EN29LV320C datasheet.
