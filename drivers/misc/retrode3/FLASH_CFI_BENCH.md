@@ -138,6 +138,37 @@ at the QRY addresses when identification fails, then validate the bus
 waveforms and board-level power. Do not attempt generic bus writes or
 Flash erase; do not blindly retry at another voltage.
 
+## Hardware result - 2026-11-23 (actual Retrode3)
+
+The operator cross-built the MIPS module and loaded it as a separate test
+`retrode3.ko` on the real Retrode3 running
+`7.3.0-rc5-letux-mips-retrode3+`. With the DragonBox MD 4MB+RAM cart present
+(`sense=active`), MD connector set to `5000mV`, an exclusive
+`/run/lock/retrode3/bus.lock`, and the temporary root-only
+`flash_cfi_test=1` gate, the userspace CFI diagnostic succeeded:
+
+```text
+CFI: QRY | primary command set: 0x0002 | interface: 0x0002 | capacity: 4194304 bytes
+  region 0: 8 blocks x 8192 bytes @ 0x00000000
+  region 1: 63 blocks x 65536 bytes @ 0x00010000
+Geometry consistent; flash erase/program NOT enabled.
+```
+
+This proves the CFI entry/read transport works on this particular test
+cartridge and its x16 AMD/Fujitsu-family query geometry is consistent
+(8 x 8 KiB boot sectors + 63 x 64 KiB sectors = 4 MiB).
+Earlier `dmesg` WARN/ENODEV lines in the supplied log are from
+prior module versions and did not recur in the final run; the latest log
+only shows module registration and 5-V selection.
+The successful result followed correction of the active-low `/OE`
+polarity in the Flash write/cleanup path. Previous bench module
+versions must not be reused.
+
+**Not yet established:** verified reset-to-array readback after query,
+measured electrical waveform/timing margin, read/manufacturer device IDs,
+other Flash models, or safe erase/program behavior. Do not enable
+automatic detection or Write Cart yet.
+
 ## Next acceptance stages
 
 1. Verify real waveforms and reset-to-array behavior with a known
