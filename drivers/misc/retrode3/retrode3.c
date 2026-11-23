@@ -55,27 +55,6 @@ static bool gbx_md_test;
 module_param_named(gbx_md_test, gbx_md_test, bool, 0644);
 MODULE_PARM_DESC(gbx_md_test,
 	"BENCH ONLY: GBx-0011 MD bus cycles (modes 23/24/25), no cart writes");
-/*
- * Explicit CFI-only Flash diagnostic gate. A CFI probe itself contains
- * bus WRITE cycles, so it must never be part of the automatic ROM probe.
- * No erase, program or generic cartridge writes are enabled here.
- * Root with CAP_SYS_RAWIO must opt in for bench testing. Keep disabled
- * when the GBx or legacy SMS/bridge hardware experiments are active.
- */
-static bool flash_cfi_test;
-module_param_named(flash_cfi_test, flash_cfi_test, bool, 0600);
-MODULE_PARM_DESC(flash_cfi_test,
-	"BENCH ONLY: enable MD CFI and chip-ID queries with array reset");
-
-/* Destructive Flash operations require this SECOND, root-only opt-in.
- * Used only by explicitly triggered test jobs, never automatic probes.
- * No production default / no generic raw-write commands. */
-static bool flash_write_test;
-module_param_named(flash_write_test, flash_write_test, bool, 0600);
-MODULE_PARM_DESC(flash_write_test,
-	"BENCH ONLY: Eon EN29LV320CB sector erase/word program (destructive)");
-
-
 /* low level address and data bus access */
 
 // FXIME: get_multiple / set_multiple could be much faster, if supported by device driver
