@@ -204,6 +204,39 @@ with `python3 tools/gbx-md-hwtest.py gba --raw`, which remains at
 full ROM dumping and inspect the new trace. Then reconfirm GB with
 a separate header-only 3.3 V run after a clean arm step.
 
+## GBA performance: optional burst path (unverified on hardware)
+
+Two independent 1 MiB Shining Force (`AF5P`) reads using the
+validated random-access GBA mode 24 produced byte-identical files
+(CRC32 `309284CE`, SHA256
+`b26b394da0f5e3dd91442cea2dbe530ed49f534ca491c7facb672092659357ef`).
+The second took `59.368s real / 55.311s sys`: approximately 17.3 KiB/s.
+Per-word kernel operations include 16 GPIO output-direction changes,
+16 input-direction changes, and 16 per-bit data samples, 524,288 words
+per 1 MiB. This explains the substantial kernel-bound time.
+
+**Experimental modes 28/29** use the exact same byte-offset ABI as
+modes 24/25, but optimize sequential GBA ROM reads. Each bounded
+128-byte block latches the 24-bit GBA word address once with /CS_ROM,
+then keeps AD0..AD15 INPUT, pulsing /RD once per word and exploiting the
+GBA ROM's sequential address counter. A fresh address latch at every
+block boundary enables independent random access to blocks. /WR stays
+HIGH and GBA remains at 3.3 V. The old 24/25 modes are unchanged.
+This path needs **actual hardware acceptance** before default enable.
+
+Benchmark safely: update/rebuild **only** the experimental module,
+load it with no adapter/cart attached and run `arm` first. Then insert
+the GBA cart and start with
+`python3 tools/gbx-md-hwtest.py gba --raw --fast`. Confirm the
+same complete, valid header as the baseline **before** ROM dumping.
+If the fast header passes, run
+`time python3 tools/gbx-md-hwtest.py gba --fast --mib 1 --dump /tmp/shiningforce-1m-fast.bin`.
+Compare with the known-good baseline using both `cmp` and SHA256;
+**CRC32 match alone is not sufficient**. Fast reads are never
+automatically selected and must not yet be exposed to the web UI.
+If a new fast mode returns an invalid header or mismatching bytes,
+revert to the already validated mode 24/25; do not alter 5-V settings.
+
 ## Device ABI (private experimental offsets)
 
 `pread` on `/dev/slot-md` with 64-bit offset
@@ -216,6 +249,8 @@ a separate header-only 3.3 V run after a clean arm step.
 | 25 | GBA ROM read, high window | 0..0xffffff (physical +0x1000000) |
 | 26 | GB read-only GPIO pin snapshot, diagnostic only at 3.3 V | 0..0xffff (2 bytes per GB ROM address; A8..A18 => bits 0..10) |
 | 27 | GBA bus-stage trace, diagnostic only at 3.3 V | 0..0x7ff (8 bytes per GBA word, 4 x 16-bit samples) |
+| 28 | GBA fast sequential burst, low window (experimental) | 0..0xffffff |
+| 29 | GBA fast sequential burst, high window (experimental) | 0..0xffffff (physical +0x1000000) |
 
 The two GBA windows cover 32 MiB. Returned GBA bytes use little-endian
 word order, matching the stage-1 portable `gba_read16(byte_addr)`.
