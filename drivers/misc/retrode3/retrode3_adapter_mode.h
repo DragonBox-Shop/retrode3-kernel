@@ -26,6 +26,11 @@
 /* GBA bus diagnosis: each 8-byte record = 4 x u16 data GPIO snapshots,
  * keyed by (GBA byte address / 2) * 8. Root-only bench, 3.3V only. */
 #define RETRODE3_GBX_MD_GBA_TRACE      27U
+/* Optional GBA sequential burst reader: same offsets as modes 24/25.
+ * Address latch once per bounded block, /RD clocks subsequent words.
+ * Retain modes 24/25 as the tested baseline/fallback. */
+#define RETRODE3_GBX_MD_GBA_BURST_LO   28U
+#define RETRODE3_GBX_MD_GBA_BURST_HI   29U
 
 static inline int retrode3_gbx_mode_is_read(unsigned int mode)
 {
@@ -33,7 +38,9 @@ static inline int retrode3_gbx_mode_is_read(unsigned int mode)
            mode == RETRODE3_GBX_MD_GBA_READ16_LO ||
            mode == RETRODE3_GBX_MD_GBA_READ16_HI ||
            mode == RETRODE3_GBX_MD_GB_PINSCAN ||
-           mode == RETRODE3_GBX_MD_GBA_TRACE;
+           mode == RETRODE3_GBX_MD_GBA_TRACE ||
+           mode == RETRODE3_GBX_MD_GBA_BURST_LO ||
+           mode == RETRODE3_GBX_MD_GBA_BURST_HI;
 }
 
 static inline int retrode3_adapter_mode_is_read(unsigned int mode)
