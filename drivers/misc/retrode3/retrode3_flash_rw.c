@@ -145,7 +145,7 @@ static int r3_flash_wait_word(struct retrode3_slot *slot, u32 address,
                               u16 expected, unsigned timeout_ms)
 {
     unsigned long until = jiffies + msecs_to_jiffies(timeout_ms);
-    u16 previous, current;
+    u16 previous, sample;
     int err;
 
     do {
@@ -155,11 +155,11 @@ static int r3_flash_wait_word(struct retrode3_slot *slot, u32 address,
         err = r3_flash_array_word(slot, address, &previous);
         if (err)
             return err;
-        err = r3_flash_array_word(slot, address, &current);
+        err = r3_flash_array_word(slot, address, &sample);
         if (err)
             return err;
-        if (((previous ^ current) & BIT(6)) == 0) {
-            if (current == expected)
+        if (((previous ^ sample) & BIT(6)) == 0) {
+            if (sample == expected)
                 return 0;
             /* Protected/failing sectors stop toggling without reaching
              * the requested array value. No unsafe re-program retry. */
