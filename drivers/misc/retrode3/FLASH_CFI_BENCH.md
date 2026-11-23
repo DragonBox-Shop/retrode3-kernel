@@ -55,6 +55,22 @@ CFI geometry, supported Eon EN29LV320CB bottom-boot ID, sector alignment
 and legal program sizes. Unknown or unrecognized chips cannot be erased
 or programmed. The driver resets the chip to read mode after commands.
 
+A sector erase waits for Flash status completion but does **not** scan
+every word of the just-erased sector. Previously, each 64 KiB erase
+performed another 32,768 slow GPIO reads, causing major delays.
+The shared CLI offers independent Erase/Write/Verify stages, with
+1..99 full-image Verify passes after writing. When Verify is disabled,
+the result is `not_checked`. Programming still polls each word for
+the Flash's command readiness.
+
+In physical testing, erase stopped at 33/57 sectors with errno
+`-16` (`EBUSY`). This indicates **bus contention or mode/slot state**,
+not an erase/verify mismatch. The driver now waits for brief
+`select_lock` contention and logs the conflicting GBx/SMS/bridge/FRAM
+mode or another occupied slot if that causes EBUSY. Voltage selection
+`3300mV` observed *after* the job may be the normal hardware-scope
+restoration from the 5V write setting.
+
 The Flash core advertises `probe_flash`, `write_flash` and
 `verify_flash`; Write Cart only becomes usable after successful Flash
 identification. The CLI reports real `erase`, `program` and `verify`
