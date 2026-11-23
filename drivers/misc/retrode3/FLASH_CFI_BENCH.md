@@ -200,6 +200,42 @@ Verify. Also verify a known original MD/SNES/NES ROM as a regression
 check before merging anything to develop/master. Do not deploy the
 experimental fast path directly as a customer package.
 
+## Next GPIO optimization: two /OE pulses per status pair
+
+**Hardware acceptance of previous revision (2026-11-24):**
+The user reports **13.3 KiB/s Write**, followed by a successful
+full-image **Verify** on the real EN29LV320CB MegaDrive cartridge.
+The previous baseline was 7.6 KiB/s Write / 151.1 KiB/s Verify.
+This confirms the previous direction-change and DQ6/DQ5 optimization;
+it does **not yet validate** the changes in this section.
+
+The EN29LV320C datasheet explicitly permits successive DQ6 toggle
+reads triggered by either an /OE or /CE read cycle. Rather than
+repeating the full /CE, address, and /WE setup for every status sample,
+`r3_flash_status_pair()` now selects the address and /CE once for a
+**pair of independent /OE read pulses**. Each pulse retains the
+tested 1us settling delay and reads only DQ6 and DQ5; /OE returns
+inactive between pulses. An asserted DQ5 still triggers the full
+two-read retry, and timeouts / error reporting are unchanged.
+
+During the second bypass programming bus cycle, only changed
+active-high data bits are updated. Those updates now use the
+driver's existing direct `set_bus_bit()` GPIO-chip method, which
+is already used for the address bus and matches the raw input-bit
+method. All 16 data lines still switch back to **input** before
+the status read. /OE, /WE, /CE safety and timing remain unchanged.
+No chip-family generalization, non-Flash changes, direct SoC register
+access, or flash writer userspace ABI changes.
+
+**Status:** changes committed to this draft feature branch, not
+MIPS kernel-compiled or hardware-tested yet. Use the prepared
+MIPS32 R2 LE tree, compile only the single module, test with the
+same known-good ROM and spare cartridge, run complete Erase,
+Write and byte-for-byte Verify, and record Write/Verify KiB/s.
+Retain the module from the verified **13.3 KiB/s** revision as a
+rollback. Only after the device verifies should any further
+optimization be considered.
+
 ## MIPS module-only build
 
 Use the existing Arch/Podman MIPS builder and the prepared
