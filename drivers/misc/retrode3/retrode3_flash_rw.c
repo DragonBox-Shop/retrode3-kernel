@@ -39,6 +39,124 @@ static int r3_flash_array_word(struct retrode3_slot *slot,
     return 0;
 }
 
+/*
+ * Polling only needs DQ6 (toggle) and DQ5 (error). In particular, this
+ * must NOT use read_word(): that reads all 16 separate GPIOs on each
+ * status sample. Keep exactly the proven /CE and /OE read timing.
+ *
+ * ALL data GPIOs were returned to input by the preceding write pulse.
+ * We never read while the Retrode is still driving the Flash bus.
+ */
+static int r3_flash_status_bits(struct retrode3_slot *slot,
+                                 u32 addr, u16 *status)
+{
+    struct retrode3_bus *bus = slot->bus;
+    int err, dq6, dq5;
+
+    if (addr >= R3_FLASH_SIZE || (addr & 1))
+        return -EINVAL;
+
+    gpiod_set_value(bus->oe, 0); /* logical 0: physical /OE high */
+    gpiod_set_value(bus->we->desc[0], 0);
+    gpiod_set_value(bus->we->desc[1], 0);
+    gpiod_set_value(slot->ce, 0);
+    err = (set_address)(bus, addr);
+    if (err)
+        return err;
+
+    gpiod_set_value(slot->ce, 1);
+    /* Same 1us settle delay and physical /OE pulse as read_word().
+     * Data GPIOs use the same direct input accessor as get_word(). */
+    set_bus_bit(bus->oe, 0);
+    udelay(1);
+    dq6 = get_bus_bit(bus->datas->desc[6]);
+    dq5 = get_bus_bit(bus->datas->desc[5]);
+    set_bus_bit(bus->oe, 1);
+    gpiod_set_value(slot->ce, 0);
+    gpiod_set_value(bus->oe, 0);
+
+    if (dq6 < 0)
+        return dq6;
+    if (dq5 < 0)
+        return dq5;
+    *status = (dq6 ? BIT(6) : 0) | (dq5 ? BIT(5) : 0);
+    return 0;
+}
+
+/*
+ * Two unlock-bypass program bus cycles: A0 at 0xAAA, then one ROM word.
+ * While /CE, /WE and /OE are inactive BETWEEN the two cycles, the
+ * Retrode can keep driving the same 16 GPIO outputs safely. Only changed
+ * data bits need updating for the second command. Release ALL 16 pins
+ * before the caller checks DQ5/DQ6, because the Flash will then drive
+ * those lines through the cartridge level translators.
+ *
+ * Do not use for CFI, erase, SRAM, legacy adapters or other cartridges.
+ */
+static int r3_flash_bypass_program_word(struct retrode3_slot *slot,
+                                         u32 addr, u16 target)
+{
+    struct retrode3_bus *bus = slot->bus;
+    int i, err, cleanup;
+    const u16 setup = 0x00a0;
+
+    if (addr >= R3_FLASH_SIZE || (addr & 1))
+        return -EINVAL;
+
+    gpiod_set_value(bus->oe, 0); /* Flash outputs disabled */
+    gpiod_set_value(bus->we->desc[0], 0);
+    gpiod_set_value(bus->we->desc[1], 0);
+    gpiod_set_value(slot->ce, 0);
+
+    err = (set_address)(bus, 0xaaa);
+    if (err)
+        goto release;
+    for (i = 0; i < 16; i++) {
+        err = gpiod_direction_output(bus->datas->desc[i],
+                                     !!(setup & BIT(i)));
+        if (err)
+            goto release;
+    }
+    udelay(1);
+    gpiod_set_value(slot->ce, 1);
+    udelay(1);
+    gpiod_set_value(bus->we->desc[0], 1);
+    gpiod_set_value(bus->we->desc[1], 1);
+    udelay(1);
+    gpiod_set_value(bus->we->desc[0], 0);
+    gpiod_set_value(bus->we->desc[1], 0);
+    udelay(1);
+
+    /* /CE inactive and both /WE inactive before changing address/data. */
+    gpiod_set_value(slot->ce, 0);
+    err = (set_address)(bus, addr);
+    if (err)
+        goto release;
+    for (i = 0; i < 16; i++) {
+        if ((setup ^ target) & BIT(i))
+            gpiod_set_value(bus->datas->desc[i],
+                            !!(target & BIT(i)));
+    }
+    udelay(1);
+    gpiod_set_value(slot->ce, 1);
+    udelay(1);
+    gpiod_set_value(bus->we->desc[0], 1);
+    gpiod_set_value(bus->we->desc[1], 1);
+    udelay(1);
+    gpiod_set_value(bus->we->desc[0], 0);
+    gpiod_set_value(bus->we->desc[1], 0);
+    udelay(1);
+
+release:
+    gpiod_set_value(bus->we->desc[0], 0);
+    gpiod_set_value(bus->we->desc[1], 0);
+    gpiod_set_value(slot->ce, 0);
+    cleanup = retrode3_flash_release_data(bus);
+    if (!err)
+        err = cleanup;
+    return err;
+}
+
 static int r3_flash_reset(struct retrode3_slot *slot)
 {
     return retrode3_flash_word_command(slot, 0, 0x00f0);
@@ -162,20 +280,20 @@ static int r3_flash_wait_ready(struct retrode3_slot *slot, u32 address,
     int err;
 
     do {
-        err = r3_flash_array_word(slot, address, &previous);
+        err = r3_flash_status_bits(slot, address, &previous);
         if (err)
             return err;
-        err = r3_flash_array_word(slot, address, &sample);
+        err = r3_flash_status_bits(slot, address, &sample);
         if (err)
             return err;
         if (!((previous ^ sample) & BIT(6)))
             return 0;
         if (sample & BIT(5)) {
             /* DQ5 timeout might race with command completion. */
-            err = r3_flash_array_word(slot, address, &previous);
+            err = r3_flash_status_bits(slot, address, &previous);
             if (err)
                 return err;
-            err = r3_flash_array_word(slot, address, &sample);
+            err = r3_flash_status_bits(slot, address, &sample);
             if (err)
                 return err;
             if (!((previous ^ sample) & BIT(6)))
@@ -338,12 +456,10 @@ static int r3_flash_program(struct retrode3_file_context *ctx,
                 break;
             bypass = true;
         }
-        /* In bypass mode only the A0 setup and target word write are
-         * needed. Poll completion before issuing the next word. */
-        err = retrode3_flash_word_command(slot, 0xaaa, 0x00a0);
-        if (err)
-            break;
-        err = retrode3_flash_word_command(slot, addr, target);
+        /* One paired A0/data sequence, then DQ6/DQ5 completion polling.
+         * The helper releases all 16 outputs before the Flash drives
+         * status data. Never issue the next word while DQ6 toggles. */
+        err = r3_flash_bypass_program_word(slot, addr, target);
         if (err)
             break;
         err = r3_flash_wait_ready(slot, addr, 1000);
