@@ -134,7 +134,7 @@ static int retrode3_flash_cfi_query(struct retrode3_slot *slot,
 {
 	struct retrode3_bus *bus = slot->bus;
 	int err, cleanup, reset_err = 0;
-	unsigned int i;
+	unsigned int i, last = 0x2d;
 	bool command_attempted = false;
 
 	if (!mutex_trylock(&bus->select_lock))
@@ -164,7 +164,7 @@ static int retrode3_flash_cfi_query(struct retrode3_slot *slot,
 		goto restore;
 	udelay(1);
 	gpiod_set_value(slot->ce, 1);
-	for (i = 0; i < RETRODE3_FLASH_CFI_QUERY_BYTES; i++) {
+	for (i = 0; i < last; i++) {
 		int value;
 
 		err = set_address(bus, i * 2);
@@ -187,9 +187,23 @@ static int retrode3_flash_cfi_query(struct retrode3_slot *slot,
 			err = -ENODEV;
 			goto restore;
 		}
+		/* Query only the standard table through the last erase-region
+		 * descriptor. Undefined high query addresses may legitimately
+		 * return floating data; don't reject a valid flash for that. */
+		if (i == 0x2c) {
+			if (!reply->data[0x2c] || reply->data[0x2c] > 8) {
+				err = -ENODEV;
+				goto restore;
+			}
+			last = 0x2d + 4 * reply->data[0x2c];
+			if (last > RETRODE3_FLASH_CFI_QUERY_BYTES) {
+				err = -ERANGE;
+				goto restore;
+			}
+		}
 	}
 	reply->bus_width_bits = 16;
-	reply->query_bytes = RETRODE3_FLASH_CFI_QUERY_BYTES;
+	reply->query_bytes = last;
 	err = 0;
 restore:
 	/* A reset is attempted after EVERY command attempt, including a
