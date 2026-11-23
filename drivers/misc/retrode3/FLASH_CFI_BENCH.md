@@ -77,6 +77,29 @@ identification. The CLI reports real `erase`, `program` and `verify`
 progress. A write job only succeeds after byte-for-byte readback of the
 selected ROM. Independent `verify_flash` performs no erase/program.
 
+## Program throughput: unlock-bypass optimization
+
+A real cartridge's Erase completed quickly, but Write reached only
+approximately 32 KiB per 10-15 seconds. The first implementation sent
+two full unlock cycles, a program setup and a data word for **every**
+16-bit word. Each bus cycle also configures and releases 16 Linux GPIO
+data lines, so overhead dominates the Flash chip's typical 8 us internal
+programming time.
+
+The EN29LV320C supports **unlock-bypass** mode (AA/55/20 entry,
+then A0 + word data for each program word, 90/00 exit). The program
+ioctl now enters bypass only when an actual word needs writing, keeps
+it for the bounded 512-byte chunk, and always exits before resetting
+the chip to array-read mode. It retains the 1-to-0 bit transition check,
+DQ6 completion polling, supported ID checks and optional full-image
+Verify via the shared CLI.
+
+This change is **not applied to the user's currently running Write**.
+Build and install the updated `.ko` only after the ongoing job finishes
+and the existing Verify result is known. The new throughput and bypass
+exit behavior still require MIPS/kernel and cartridge tests. The
+host-side syntax CI compiles only a userspace bench, **not the kernel**.
+
 ## MIPS module-only build
 
 Use the existing Arch/Podman MIPS builder and the prepared
