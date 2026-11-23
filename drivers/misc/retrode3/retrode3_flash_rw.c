@@ -75,8 +75,14 @@ static int r3_flash_identify(struct retrode3_slot *slot,
         cfi.data[0x11] != 'R' || cfi.data[0x12] != 'Y' ||
         cfi.data[0x13] != 2 || cfi.data[0x14] != 0 ||
         cfi.data[0x27] != 22 || cfi.data[0x2c] != 2 ||
-        cfi.data[0x28] != 2 || cfi.data[0x29] != 0)
+        cfi.data[0x28] != 2 || cfi.data[0x29] != 0) {
+        dev_warn(&slot->dev,
+                 "Flash ID: CFI table mismatch: len=%u cmd=%02x%02x size_exp=%u interface=%02x%02x regions=%u\\n",
+                 cfi.query_bytes, cfi.data[0x14], cfi.data[0x13],
+                 cfi.data[0x27], cfi.data[0x29], cfi.data[0x28],
+                 cfi.data[0x2c]);
         return -ENODEV;
+    }
     for (i = 0; i < 2; i++) {
         u32 pos = 0x2d + 4 * i;
         u32 blocks = (u32)cfi.data[pos] |
@@ -120,11 +126,13 @@ restore:
         err = reset_err;
     if (!err) {
         /* Eon A8 low returns 0x7f; some variants return 0x1c. */
-        if ((manufacturer & 0xff) != 0x7f &&
-            (manufacturer & 0xff) != 0x1c)
+        if (((manufacturer & 0xff) != 0x7f &&
+             (manufacturer & 0xff) != 0x1c) || device != 0x22f9) {
+            dev_warn(&slot->dev,
+                     "Flash ID: unsupported manufacturer=%04x device=%04x (expected EN29LV320CB 22f9)\\n",
+                     (unsigned int)manufacturer, (unsigned int)device);
             err = -ENODEV;
-        if (device != 0x22f9)
-            err = -ENODEV; /* bottom boot, not top boot */
+        }
     }
     if (!err) {
         id->manufacturer_id = manufacturer;
