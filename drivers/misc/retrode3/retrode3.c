@@ -65,7 +65,15 @@ MODULE_PARM_DESC(gbx_md_test,
 static bool flash_cfi_test;
 module_param_named(flash_cfi_test, flash_cfi_test, bool, 0600);
 MODULE_PARM_DESC(flash_cfi_test,
-	"BENCH ONLY: MD x16 CFI query with automatic reset, no erase/program");
+	"BENCH ONLY: enable MD CFI and chip-ID queries with array reset");
+
+/* Destructive Flash operations require this SECOND, root-only opt-in.
+ * Used only by explicitly triggered test jobs, never automatic probes.
+ * No production default / no generic raw-write commands. */
+static bool flash_write_test;
+module_param_named(flash_write_test, flash_write_test, bool, 0600);
+MODULE_PARM_DESC(flash_write_test,
+	"BENCH ONLY: Eon EN29LV320CB sector erase/word program (destructive)");
 
 
 /* low level address and data bus access */
