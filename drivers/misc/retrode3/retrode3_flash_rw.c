@@ -40,47 +40,61 @@ static int r3_flash_array_word(struct retrode3_slot *slot,
 }
 
 /*
- * Polling only needs DQ6 (toggle) and DQ5 (error). In particular, this
- * must NOT use read_word(): that reads all 16 separate GPIOs on each
- * status sample. Keep exactly the proven /CE and /OE read timing.
+ * Read TWO independent DQ6/DQ5 samples at the same status address.
+ * The EN29LV320C allows successive reads with /CE asserted and /OE
+ * pulsed for each read cycle. Set the address and assert /CE just ONCE
+ * per pair, but keep a distinct physical /OE edge and the proven 1 us
+ * settling delay for each sample. This is NOT a single read twice:
+ * toggling requires two distinct /OE read cycles.
  *
- * ALL data GPIOs were returned to input by the preceding write pulse.
- * We never read while the Retrode is still driving the Flash bus.
+ * All 16 Retrode data GPIOs MUST be inputs before either /OE pulse.
+ * The preceding Flash word writer releases all 16 data drivers.
+ * Keep both /WE lines inactive and restore /OE and /CE on every exit.
+ * Only DQ6 (toggle) and DQ5 (timeout) are used by the status algorithm.
  */
-static int r3_flash_status_bits(struct retrode3_slot *slot,
-                                 u32 addr, u16 *status)
+static int r3_flash_status_pair(struct retrode3_slot *slot,
+                                u32 addr, u16 *first, u16 *second)
 {
     struct retrode3_bus *bus = slot->bus;
-    int err, dq6, dq5;
+    u16 *samples[2] = { first, second };
+    int err, dq6, dq5, i;
 
     if (addr >= R3_FLASH_SIZE || (addr & 1))
         return -EINVAL;
 
-    gpiod_set_value(bus->oe, 0); /* logical 0: physical /OE high */
+    /* Data is input; physical /OE high, both /WE inactive, /CE off. */
+    gpiod_set_value(bus->oe, 0);
     gpiod_set_value(bus->we->desc[0], 0);
     gpiod_set_value(bus->we->desc[1], 0);
     gpiod_set_value(slot->ce, 0);
     err = (set_address)(bus, addr);
     if (err)
-        return err;
+        goto restore;
 
     gpiod_set_value(slot->ce, 1);
-    /* Same 1us settle delay and physical /OE pulse as read_word().
-     * Data GPIOs use the same direct input accessor as get_word(). */
-    set_bus_bit(bus->oe, 0);
-    udelay(1);
-    dq6 = get_bus_bit(bus->datas->desc[6]);
-    dq5 = get_bus_bit(bus->datas->desc[5]);
-    set_bus_bit(bus->oe, 1);
-    gpiod_set_value(slot->ce, 0);
-    gpiod_set_value(bus->oe, 0);
+    for (i = 0; i < 2; ++i) {
+        /* set_bus_bit() uses physical levels; /OE low starts the
+         * next read cycle, high ends it. /CE remains selected. */
+        set_bus_bit(bus->oe, 0);
+        udelay(1);
+        dq6 = get_bus_bit(bus->datas->desc[6]);
+        dq5 = get_bus_bit(bus->datas->desc[5]);
+        set_bus_bit(bus->oe, 1);
+        if (dq6 < 0) {
+            err = dq6;
+            break;
+        }
+        if (dq5 < 0) {
+            err = dq5;
+            break;
+        }
+        *samples[i] = (dq6 ? BIT(6) : 0) | (dq5 ? BIT(5) : 0);
+    }
 
-    if (dq6 < 0)
-        return dq6;
-    if (dq5 < 0)
-        return dq5;
-    *status = (dq6 ? BIT(6) : 0) | (dq5 ? BIT(5) : 0);
-    return 0;
+restore:
+    gpiod_set_value(bus->oe, 0);
+    gpiod_set_value(slot->ce, 0);
+    return err;
 }
 
 /*
@@ -280,20 +294,14 @@ static int r3_flash_wait_ready(struct retrode3_slot *slot, u32 address,
     int err;
 
     do {
-        err = r3_flash_status_bits(slot, address, &previous);
-        if (err)
-            return err;
-        err = r3_flash_status_bits(slot, address, &sample);
+        err = r3_flash_status_pair(slot, address, &previous, &sample);
         if (err)
             return err;
         if (!((previous ^ sample) & BIT(6)))
             return 0;
         if (sample & BIT(5)) {
             /* DQ5 timeout might race with command completion. */
-            err = r3_flash_status_bits(slot, address, &previous);
-            if (err)
-                return err;
-            err = r3_flash_status_bits(slot, address, &sample);
+            err = r3_flash_status_pair(slot, address, &previous, &sample);
             if (err)
                 return err;
             if (!((previous ^ sample) & BIT(6)))
