@@ -203,6 +203,65 @@ static int retrode3_gbx_gba_read16(struct retrode3_bus *bus, u32 byte_addr)
 }
 
 /*
+ * Experimental GBA sequential burst mode. /CS_ROM latches the first
+ * 24-bit word address, after which each completed /RD pulse advances
+ * the cartridge's internal ROM word counter. Keep the bidirectional
+ * AD0..15 bus in INPUT mode for the entire burst: this avoids 16
+ * output-direction and 16 input-direction changes for every word.
+ *
+ * Only used by dedicated modes 28/29; the independently hardware-
+ * validated random-access modes 24/25 are unchanged. All transactions
+ * stay ROM-only with /WR held HIGH and voltage checked by caller.
+ * Bounded by the existing 128-byte stack buffer (fresh latch per block).
+ */
+static int retrode3_gbx_gba_read_burst(struct retrode3_bus *bus,
+				      u32 byte_addr, u8 *out, size_t count)
+{
+	u32 word_addr = byte_addr >> 1;
+	size_t written = 0;
+	int i, value, ret = 0;
+
+	/* Drive the 24-bit GBA word address while selects are inactive. */
+	for (i = 0; i < 8; ++i)
+		set_bus_bit(bus->addrs->desc[GBX_HIGH_DATA_FIRST + i],
+			    (word_addr >> (16 + i)) & 1);
+	set_word(bus, (u16)word_addr);
+	udelay(2);
+	set_bus_bit(bus->addrs->desc[GBX_CS_ROM], 0);
+	udelay(2);
+
+	/* The cartridge owns AD0..15 throughout the sequential ROM burst. */
+	end_drive_word(bus);
+	while (written < count) {
+		set_bus_bit(bus->addrs->desc[GBX_RD], 0);
+		udelay(1);
+		value = get_word(bus);
+		set_bus_bit(bus->addrs->desc[GBX_RD], 1);
+		if (value < 0) {
+			ret = value;
+			break;
+		}
+
+		if (byte_addr & 1U) {
+			out[written++] = (u8)(value >> 8);
+			++byte_addr;
+		} else {
+			out[written++] = (u8)value;
+			++byte_addr;
+			if (written < count) {
+				out[written++] = (u8)(value >> 8);
+				++byte_addr;
+			}
+		}
+		/* Allow the GBA to advance its internal word counter. */
+		udelay(1);
+	}
+
+	retrode3_gbx_idle(bus);
+	return ret;
+}
+
+/*
  * Read-only GBA timing diagnostic, independent of normal ROM output.
  * For each GBA word, capture four data GPIO states:
  *   0: multiplexed address driven, /CS high, /RD high
@@ -273,7 +332,11 @@ static ssize_t retrode3_gbx_read(struct retrode3_slot *slot,
 {
 	struct retrode3_bus *bus = slot->bus;
 	const bool gba = mode == RETRODE3_GBX_MD_GBA_READ16_LO ||
-			 mode == RETRODE3_GBX_MD_GBA_READ16_HI;
+			 mode == RETRODE3_GBX_MD_GBA_READ16_HI ||
+			 mode == RETRODE3_GBX_MD_GBA_BURST_LO ||
+			 mode == RETRODE3_GBX_MD_GBA_BURST_HI;
+	const bool burst = mode == RETRODE3_GBX_MD_GBA_BURST_LO ||
+			   mode == RETRODE3_GBX_MD_GBA_BURST_HI;
 	const bool pins = mode == RETRODE3_GBX_MD_GB_PINSCAN;
 	const bool trace = mode == RETRODE3_GBX_MD_GBA_TRACE;
 	const u32 addr = (u32)(*ppos & 0xffffffULL);
@@ -304,7 +367,8 @@ static ssize_t retrode3_gbx_read(struct retrode3_slot *slot,
 	if (!gba && voltage != 3300 && voltage != 5000)
 		return -EPERM;
 	full_addr = addr;
-	if (mode == RETRODE3_GBX_MD_GBA_READ16_HI)
+	if (mode == RETRODE3_GBX_MD_GBA_READ16_HI ||
+	    mode == RETRODE3_GBX_MD_GBA_BURST_HI)
 		full_addr |= 0x1000000U;
 
 	/* The MD CE goes only to the unpopulated N64 pins on GBx-0011.
@@ -318,7 +382,12 @@ static ssize_t retrode3_gbx_read(struct retrode3_slot *slot,
 		size_t i, n = min_t(size_t, sizeof(block), count - completed);
 
 		retrode3_cart_led_activity(slot);
-		for (i = 0; i < n; ) {
+		if (burst) {
+			err = retrode3_gbx_gba_read_burst(bus,
+					full_addr + completed, block, n);
+			if (err < 0)
+				goto out;
+		} else for (i = 0; i < n; ) {
 			if (trace) {
 				u16 samples[4];
 				unsigned int j;
