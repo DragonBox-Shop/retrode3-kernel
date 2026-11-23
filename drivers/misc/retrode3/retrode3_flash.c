@@ -99,8 +99,13 @@ static int retrode3_flash_check_slot(struct retrode3_slot *slot)
 	    IS_ERR_OR_NULL(slot->power))
 		return -EOPNOTSUPP;
 	if (gbx_md_test || bus->gbx_active || legacy_bridge_hiz_test ||
-	    sms_mapper_write_test || slot->fram_mode)
+	    sms_mapper_write_test || slot->fram_mode) {
+		dev_warn(&slot->dev,
+			 "Flash bus busy: gbx_md_test=%u gbx_active=%u legacy=%u sms=%u fram=%u\n",
+			 !!gbx_md_test, !!bus->gbx_active, !!legacy_bridge_hiz_test,
+			 !!sms_mapper_write_test, !!slot->fram_mode);
 		return -EBUSY;
+	}
 
 	/* On this Retrode3 board, the native MD slot selects 5 V with the
 	 * power-control GPIO driven low (output direction, logical value 0).
@@ -134,8 +139,12 @@ static int retrode3_flash_check_slot(struct retrode3_slot *slot)
 		present = gpiod_get_value(other->cd);
 		if (present < 0)
 			return present;
-		if (present)
+		if (present) {
+			dev_warn(&slot->dev,
+				 "Flash bus busy: another cartridge slot reports occupied (slot index %d)\n",
+				 i);
 			return -EBUSY;
+		}
 	}
 	return 0;
 }
@@ -156,8 +165,8 @@ static int retrode3_flash_cfi_query(struct retrode3_slot *slot,
 	u16 signature_words[3] = { 0 };
 	bool command_attempted = false;
 
-	if (!mutex_trylock(&bus->select_lock))
-		return -EBUSY;
+	if (mutex_lock_interruptible(&bus->select_lock))
+		return -ERESTARTSYS;
 
 	err = retrode3_flash_check_slot(slot);
 	if (err)
