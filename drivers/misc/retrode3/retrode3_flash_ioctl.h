@@ -8,9 +8,10 @@
  * opt-in sector erase and bounded program operations for one known flash
  * device on the native Mega Drive slot. Not a generic raw-write ABI.
  *
- * The caller must explicitly select Write Cart, verify the supply voltage,
- * hold the shared Retrode3 userspace bus lock and ensure nobody else is
- * accessing a cartridge. flash_cfi_test defaults to OFF; root must opt in.
+ * The caller must explicitly select the Flash operation and hold the
+ * shared Retrode3 userspace bus lock. Device-node permissions govern access.
+ * The driver enforces the native 16-bit MD slot, correct 5V selection,
+ * supported chip identity, geometry and valid sector/chunk boundaries.
  */
 #include <linux/ioctl.h>
 #include <linux/types.h>
@@ -27,9 +28,8 @@ struct retrode3_flash_cfi_query_v1 {
 };
 
 /* Experimental requests use native kernel ioctl encoding (including MIPS).
- * The flash_write_test root-only module gate is additionally required for
- * destructive requests. Only an Eon EN29LV320CB bottom-boot geometry may
- * pass the in-kernel identity/CFI check before each operation. */
+ * Only a matching Eon EN29LV320CB bottom-boot geometry may pass the
+ * in-kernel identity/CFI check for erase and program operations. */
 #define RETRODE3_FLASH_CHUNK_BYTES 512U
 struct retrode3_flash_id_v1 {
     __u32 abi_version;       /* input: 1 */
