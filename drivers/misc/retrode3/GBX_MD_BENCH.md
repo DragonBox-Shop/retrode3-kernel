@@ -204,7 +204,7 @@ with `python3 tools/gbx-md-hwtest.py gba --raw`, which remains at
 full ROM dumping and inspect the new trace. Then reconfirm GB with
 a separate header-only 3.3 V run after a clean arm step.
 
-## GBA performance: optional burst path (unverified on hardware)
+## GBA performance: optional burst path (1 MiB hardware test passed)
 
 Two independent 1 MiB Shining Force (`AF5P`) reads using the
 validated random-access GBA mode 24 produced byte-identical files
@@ -222,7 +222,8 @@ then keeps AD0..AD15 INPUT, pulsing /RD once per word and exploiting the
 GBA ROM's sequential address counter. A fresh address latch at every
 block boundary enables independent random access to blocks. /WR stays
 HIGH and GBA remains at 3.3 V. The old 24/25 modes are unchanged.
-This path needs **actual hardware acceptance** before default enable.
+The 1 MiB comparison below passed, but full ROM and wider cartridge testing
+remain necessary before enabling this path by default.
 
 Benchmark safely: update/rebuild **only** the experimental module,
 load it with no adapter/cart attached and run `arm` first. Then insert
@@ -236,6 +237,29 @@ Compare with the known-good baseline using both `cmp` and SHA256;
 automatically selected and must not yet be exposed to the web UI.
 If a new fast mode returns an invalid header or mismatching bytes,
 revert to the already validated mode 24/25; do not alter 5-V settings.
+
+## Verified 1 MiB GBA burst test (2026-11-23)
+
+Shining Force GBA `AF5P` was read as two 1 MiB files with the baseline
+random-access transport (mode 24) and once with the opt-in sequential
+burst transport (mode 28). The baseline copies were byte-identical.
+The experimental burst copy was also **byte-identical** to baseline
+according to `cmp`, CRC32 `309284CE` and SHA256
+`b26b394da0f5e3dd91442cea2dbe530ed49f534ca491c7facb672092659357ef`.
+Both readers passed the GBA header check at 3.3 V.
+
+Measured `time` on the target Retrode3:
+
+| Mode | 1 MiB real | user | sys | Throughput |
+|---|---:|---:|---:|---:|
+| Random access (24) | 59.368 s | 0.919 s | 55.311 s | 17.3 KiB/s |
+| Sequential burst (28) | 8.943 s | 0.848 s | 7.157 s | 114.5 KiB/s |
+
+Speedup approximately **6.64x** for this 1 MiB test. This is
+**hardware-validated for one 1 MiB ROM prefix**, not proof of
+full-cartridge correctness, behavior at 16 MiB window boundaries,
+or correctness with other cartridges. Keep the baseline modes 24/25
+intact and the burst mode opt-in until further acceptance tests.
 
 ## Device ABI (private experimental offsets)
 
