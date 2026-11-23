@@ -22,9 +22,10 @@ After CFI exit/reset, a normal ROM read at byte offset 0x100 returned
 The earlier faulty active-low `/OE` direction was corrected; do not
 reuse older test modules.
 
-**Not yet hardware-verified:** manufacturer/device autoselect result,
-erase, programming, physical timing margins and full ROM readback.
-Implementation and CI compilation are NOT a substitute for those tests.
+**Previously hardware-verified:** an earlier Flash transport revision erased,
+programmed and byte-for-byte verified a 3.13 MiB image, and the resulting
+cartridge ran on an original MegaDrive. The current GPIO fast path is an
+**untested experiment**; the previous acceptance result does not validate it.
 
 ## Normal software path
 
@@ -90,9 +91,9 @@ The EN29LV320C supports **unlock-bypass** mode (AA/55/20 entry,
 then A0 + word data for each program word, 90/00 exit). The program
 ioctl now enters bypass only when an actual word needs writing, keeps
 it for the bounded 512-byte chunk, and always exits before resetting
-the chip to array-read mode. It retains the 1-to-0 bit transition check,
-DQ6 completion polling, supported ID checks and optional full-image
-Verify via the shared CLI.
+the chip to array-read mode. The later program-stage optimization removed redundant pre-program
+old-word reads; the DQ6/DQ5 completion polling, supported chip checks
+and optional full-image Verify remain in place.
 
 This change is **not applied to the user's currently running Write**.
 Build and install the updated `.ko` only after the ongoing job finishes
@@ -125,12 +126,11 @@ copies a complete 1024-byte block at a time. When
 `CONFIG_RETRODE3_BUFFER=y`, the existing buffered route is unchanged.
 No SNES/NES/GBx/FRAM logic is touched.
 
-Further GPIO bus-speed candidates are GPIO-chip `get_multiple` and
-retaining data-direction configuration during adjacent Flash command
-cycles. Both require explicit electrical and hardware throughput tests
-before using them; the data GPIOs may span multiple SoC banks. The
-512-byte program ioctl currently also re-identifies the chip before
-each chunk, contributing extra CFI/autoselect overhead.
+GPIO-chip `get_multiple` might provide another improvement, but the
+individual GPIOs may span multiple SoC banks and need hardware
+validation. The current feature branch now retains direction across
+the two Flash program command cycles and identifies the chip once
+per open Flash session, not once per 512-byte block.
 
 **Status:** this update requires a new module-only cross-build and
 device tests. Host-side Flash bench CI alone does not validate the
