@@ -22,8 +22,14 @@ Stage-1 portable reader is in `retrode3-oscr` branch
   (and releasing the IRQ/audio GPIO), the GBA header passes.
 * **Not yet established:** complete and reproducible GBA ROM dumping,
   successful GB MBC bank switching, GB/GBA electrical oscilloscope checks,
-  independent GB regression **after the final control-line remap**,
   GBC-only behavior, and normal system regression. Keep on feature branches.
+* **Regression after the final control-line remap now passed (2026-11-23):**
+  two independent consecutive GBA `--raw` probes yielded byte-identical
+  192-byte headers for `SHININGFORCE` / `AF5P`, followed by two
+  independent consecutive GB `--raw` probes yielding byte-identical
+  80-byte headers for `PINBALL` / `type=01 ROM=01 RAM=00`. All four
+  checksum validations passed at 3.3 V, using the same corrected test
+  kernel. Full ROM/CRC verification is still outstanding.
 
 ## Intended physical test
 
