@@ -196,6 +196,66 @@ static int retrode3_gbx_gba_read16(struct retrode3_bus *bus, u32 byte_addr)
 }
 
 /*
+ * Read-only GBA timing diagnostic, independent of normal ROM output.
+ * For each GBA word, capture four data GPIO states:
+ *   0: multiplexed address driven, /CS high, /RD high
+ *   1: address still driven, /CS low, /RD high
+ *   2: all data GPIOs INPUT, /CS low, /RD high
+ *   3: all data GPIOs INPUT, /CS low, /RD low (ROM should drive)
+ *
+ * This reproduces the OSCR readWord() strobes, with extra settle time
+ * to make the input/output handoff observable. Never assert /WR.
+ */
+static int retrode3_gbx_gba_trace(struct retrode3_bus *bus,
+				 u32 byte_addr, u16 samples[4])
+{
+	u32 word_addr = byte_addr >> 1;
+	int i, value, ret = 0;
+
+	for (i = 0; i < 8; ++i)
+		set_bus_bit(bus->addrs->desc[GBX_HIGH_DATA_FIRST + i],
+			    (word_addr >> (16 + i)) & 1);
+	set_word(bus, (u16)word_addr);
+	udelay(2);
+	value = get_word(bus);
+	if (value < 0) {
+		ret = value;
+		goto done;
+	}
+	samples[0] = (u16)value;
+
+	set_bus_bit(bus->addrs->desc[GBX_CS_ROM], 0);
+	udelay(2);
+	value = get_word(bus);
+	if (value < 0) {
+		ret = value;
+		goto done;
+	}
+	samples[1] = (u16)value;
+
+	end_drive_word(bus);
+	udelay(5);
+	value = get_word(bus);
+	if (value < 0) {
+		ret = value;
+		goto done;
+	}
+	samples[2] = (u16)value;
+
+	set_bus_bit(bus->addrs->desc[GBX_RD], 0);
+	udelay(10);
+	value = get_word(bus);
+	if (value < 0) {
+		ret = value;
+		goto done;
+	}
+	samples[3] = (u16)value;
+done:
+	retrode3_gbx_idle(bus);
+	return ret;
+}
+
+/*
  * Character-device offset still has the existing 24-bit address window.
  * Mode 24 provides GBA bytes 0..16MiB-1, mode 25 the upper 16MiB.
  * All bytes are presented in cartridge-native little-endian order.
@@ -208,8 +268,11 @@ static ssize_t retrode3_gbx_read(struct retrode3_slot *slot,
 	const bool gba = mode == RETRODE3_GBX_MD_GBA_READ16_LO ||
 			 mode == RETRODE3_GBX_MD_GBA_READ16_HI;
 	const bool pins = mode == RETRODE3_GBX_MD_GB_PINSCAN;
+	const bool trace = mode == RETRODE3_GBX_MD_GBA_TRACE;
 	const u32 addr = (u32)(*ppos & 0xffffffULL);
-	const u32 limit = gba ? 0x1000000U : (pins ? 0x10000U : 0x8000U);
+	/* 256 GBA words; each 8-byte record contains four 16-bit stages. */
+	const u32 limit = (gba ? 0x1000000U :
+			   (trace ? 0x800U : (pins ? 0x10000U : 0x8000U)));
 	u32 full_addr;
 	u8 block[128];
 	size_t completed = 0;
@@ -223,10 +286,13 @@ static ssize_t retrode3_gbx_read(struct retrode3_slot *slot,
 		return -ERANGE;
 	if (!count)
 		return 0;
+	/* Diagnostics are single 8-byte records to avoid partial cycles. */
+	if (trace && ((addr & 7U) || count != 8U))
+		return -EINVAL;
 	/* Bounded transactions prevent one large read from monopolizing the bus. */
 	count = min_t(size_t, count, 4096);
 	voltage = get_slot_power_mV(slot);
-	if ((gba || pins) && voltage != 3300)
+	if ((gba || pins || trace) && voltage != 3300)
 		return -EPERM;
 	if (!gba && voltage != 3300 && voltage != 5000)
 		return -EPERM;
@@ -237,7 +303,7 @@ static ssize_t retrode3_gbx_read(struct retrode3_slot *slot,
 	/* The MD CE goes only to the unpopulated N64 pins on GBx-0011.
 	 * Selecting MD here serializes against the regular slot reader. */
 	select_slot(bus, slot);
-	err = retrode3_gbx_prepare(bus, gba);
+	err = retrode3_gbx_prepare(bus, gba || trace);
 	if (err)
 		goto out;
 
@@ -246,7 +312,20 @@ static ssize_t retrode3_gbx_read(struct retrode3_slot *slot,
 
 		retrode3_cart_led_activity(slot);
 		for (i = 0; i < n; ) {
-			if (pins) {
+			if (trace) {
+				u16 samples[4];
+				unsigned int j;
+
+				err = retrode3_gbx_gba_trace(bus,
+						((full_addr + completed) >> 3) << 1,
+						samples);
+				if (err < 0)
+					goto out;
+				for (j = 0; j < 4; ++j) {
+					block[i++] = (u8)samples[j];
+					block[i++] = (u8)(samples[j] >> 8);
+				}
+			} else if (pins) {
 				u32 offset = full_addr + completed + i;
 				int snapshot = retrode3_gbx_gb_pins(bus,
 								 (u16)(offset >> 1));
