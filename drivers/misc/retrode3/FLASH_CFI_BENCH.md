@@ -164,6 +164,42 @@ does not guarantee protection against an unusually fast
 remove/reinsert between two samples; there is no independent
 physical cartridge identity signal for that case.
 
+## GPIO Flash write performance experiment: paired command and status bits
+
+The real-device baseline after one-time CFI identification was
+**7.6 KiB/s Write** versus **151.1 KiB/s Verify/readback**. The
+Flash's 16-bit read capability is clearly not the only bottleneck.
+This new experiment affects **only the kernel Flash ioctl transport**.
+
+For each programmed word in unlock-bypass mode the driver still sends
+**two real x16 Flash command cycles** (A0 setup and target data), with
+the original per-cycle 1us settle/write pulse timings. Between those
+two cycles it now leaves all 16 Retrode data GPIOs configured as
+outputs while /CE, /WE and /OE are inactive; changed data bits are
+updated with `gpiod_set_value` instead of unnecessarily switching
+each pin input and then output again. **Before every status read all
+16 Retrode data pins are released to input** so the Flash/level
+translator can drive the bus without electrical contention.
+
+DQ6 toggle and DQ5 timeout logic is unchanged, including the two
+sample completion rule, DQ5 race recheck and bounded timeouts.
+Only the two required GPIO inputs (D6 and D5) are sampled in each
+status bus read instead of building a 16-bit status word from all
+data GPIOs. /CE and /OE bus timing and protection remain unchanged.
+This optimization is restricted to Flash's specific write/status
+helpers; regular cartridge ROM, SRAM, NES, SNES and GBx read/write
+transports are untouched.
+
+**This revision has not been MIPS cross-compiled or tested on
+hardware yet.** Compile only `M=drivers/misc/retrode3 modules`
+with the prepared matching Letux tree, keep the previous known-good
+module as a fallback, and use a spare Flash cart. Test Erase + Write +
+one complete byte-for-byte Verify (and boot the cartridge in a MegaDrive
+if available); measure displayed KiB/s separately during Write and
+Verify. Also verify a known original MD/SNES/NES ROM as a regression
+check before merging anything to develop/master. Do not deploy the
+experimental fast path directly as a customer package.
+
 ## MIPS module-only build
 
 Use the existing Arch/Podman MIPS builder and the prepared
