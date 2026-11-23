@@ -307,6 +307,51 @@ static ssize_t retrode3_read(struct file *file, char __user *buf,
 // if ((addr &0xff) == 0)
 // 	dev_info(&slot->dev, "%s: ppos=%08llx (fram=%d mode=%d addr=%x) count=%ld\n", __func__, *ppos, slot->fram_mode, mode, addr, count);
 
+#ifndef CONFIG_RETRODE3_BUFFER
+	/*
+	 * The x16 MegaDrive ROM read path also backs Flash Verify. Without
+	 * CONFIG_RETRODE3_BUFFER, the legacy loop below copy_to_user()'d
+	 * EVERY two-byte word. Read the same words with the same address/OE
+	 * timing, but copy one 1-KiB block to userspace at a time instead.
+	 * No change to GBx, byte-lane, FRAM, NES or SNES timing semantics.
+	 */
+	if (mode == MD_ROM && slot->bus_width == 16 && !slot->fram_mode &&
+	    !(addr & 1) && !(count & 1) && count >= 2) {
+		u8 words[1024];
+
+		while (count) {
+			size_t chunk = min_t(size_t, count, sizeof(words));
+			size_t j;
+
+			retrode3_cart_led_activity(slot);
+			for (j = 0; j < chunk; j += 2) {
+				int sampled;
+
+				err = _set_address(mode, slot, addr + j);
+				if (err < 0)
+					goto failed;
+				sampled = read_word(slot->bus);
+				if (sampled < 0) {
+					err = sampled;
+					goto failed;
+				}
+				words[j] = (u8)((u16)sampled >> 8);
+				words[j + 1] = (u8)sampled;
+			}
+			if (copy_to_user(buf + read, words, chunk)) {
+				err = -EFAULT;
+				goto failed;
+			}
+			read += chunk;
+			count -= chunk;
+			addr += chunk;
+			*ppos += chunk;
+		}
+		select_slot(slot->bus, NULL);
+		return read;
+	}
+#endif
+
 	while (count > 0) {
 		if (!(read & 0x3ff))
 			retrode3_cart_led_activity(slot);
