@@ -148,8 +148,10 @@ static int r3_flash_bypass_program_word(struct retrode3_slot *slot,
         goto release;
     for (i = 0; i < 16; i++) {
         if ((setup ^ target) & BIT(i))
-            gpiod_set_value(bus->datas->desc[i],
-                            !!(target & BIT(i)));
+            /* Data bits are active-high raw lines. This matches
+             * get_bus_bit() and the existing direct address GPIO path;
+             * /CE and /WE are inactive during these updates. */
+            set_bus_bit(bus->datas->desc[i], !!(target & BIT(i)));
     }
     udelay(1);
     gpiod_set_value(slot->ce, 1);
