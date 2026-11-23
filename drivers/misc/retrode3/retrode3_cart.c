@@ -187,7 +187,8 @@ static struct retrode3_slot *legacy_bridge_md_slot(struct retrode3_bus *bus)
 static ssize_t retrode3_read(struct file *file, char __user *buf,
 			size_t count, loff_t *ppos)
 {
-	struct retrode3_slot *slot = file->private_data;
+	struct retrode3_file_context *ctx = file->private_data;
+	struct retrode3_slot *slot = ctx->slot;
 	struct gpio_desc *bridge_md_ce = NULL;
 	bool is_md = of_device_is_compatible(slot->dev.of_node,
 			"openpandora,retrode3-slot-megadrive");
@@ -756,7 +757,8 @@ restore:
 static ssize_t retrode3_write(struct file *file, const char __user *buf,
 			 size_t count, loff_t *ppos)
 {
-	struct retrode3_slot *slot = file->private_data;
+	struct retrode3_file_context *ctx = file->private_data;
+	struct retrode3_slot *slot = ctx->slot;
 	uint32_t addr = *ppos & 0xffffff;	/* max address is 24 bit */
 	uint32_t mode = *ppos >> 24;		/* access mode control */
 	ssize_t written, sz;
@@ -1204,6 +1206,7 @@ static loff_t retrode3_lseek(struct file *file, loff_t offset, int orig)
 
 static int retrode3_open(struct inode *inode, struct file *file)
 {
+	struct retrode3_file_context *ctx;
 	struct retrode3_slot *slot;
 	int ret = 0;
 
@@ -1237,18 +1240,26 @@ static int retrode3_open(struct inode *inode, struct file *file)
 		return ret;
 	}
 
-	file->private_data = slot;
+	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
+	if (!ctx) {
+		put_device(&slot->dev);
+		return -ENOMEM;
+	}
+	ctx->slot = slot;
+	file->private_data = ctx;
 
 	return ret;
 }
 
 static int retrode3_release(struct inode *inode, struct file *file)
 {
-	struct retrode3_slot *slot = file->private_data;
+	struct retrode3_file_context *ctx = file->private_data;
+	struct retrode3_slot *slot = ctx->slot;
 
         dev_dbg(&slot->dev, "%s\n", __func__);
 
 	put_device(&slot->dev);
+	kfree(ctx);
 
 	return 0;
 }
@@ -1333,6 +1344,7 @@ int retrode3_probe_slot(struct retrode3_slot *slot, struct device_node *child)
 	}
 
 	slot->cd_state = -1;
+	atomic_set(&slot->cd_epoch, 0);
 	/* status-led points to a gpio-leds class device, not a status GPIO. */
 	if (of_property_present(child, "status-led")) {
 		scnprintf(slot->status_led_trigger_name,
@@ -1377,6 +1389,7 @@ static void retrode3_update_cd(struct retrode3_slot *slot)
 // printk("%s: state changed to %d\n", __func__, cd_state);
 
 		slot->cd_state = cd_state;
+		atomic_inc(&slot->cd_epoch);
 
 		led_trigger_event(slot->status_led_trigger,
 				  cd_state ? LED_FULL : LED_OFF);
