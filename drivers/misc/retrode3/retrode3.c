@@ -55,6 +55,18 @@ static bool gbx_md_test;
 module_param_named(gbx_md_test, gbx_md_test, bool, 0644);
 MODULE_PARM_DESC(gbx_md_test,
 	"BENCH ONLY: GBx-0011 MD bus cycles (modes 23/24/25), no cart writes");
+/*
+ * Explicit CFI-only Flash diagnostic gate. A CFI probe itself contains
+ * bus WRITE cycles, so it must never be part of the automatic ROM probe.
+ * No erase, program or generic cartridge writes are enabled here.
+ * Root with CAP_SYS_RAWIO must opt in for bench testing. Keep disabled
+ * when the GBx or legacy SMS/bridge hardware experiments are active.
+ */
+static bool flash_cfi_test;
+module_param_named(flash_cfi_test, flash_cfi_test, bool, 0600);
+MODULE_PARM_DESC(flash_cfi_test,
+	"BENCH ONLY: MD x16 CFI query with automatic reset, no erase/program");
+
 
 /* low level address and data bus access */
 
