@@ -285,7 +285,8 @@ static int r3_flash_program(struct retrode3_slot *slot,
     struct retrode3_bus *bus = slot->bus;
     u32 i;
     u16 old, target;
-    int err, reset_err;
+    int err, reset_err, bypass_err;
+    bool bypass = false;
 
     if (!request->length || request->length > RETRODE3_FLASH_CHUNK_BYTES ||
         (request->length & 1) || (request->offset_bytes & 1) ||
@@ -315,9 +316,21 @@ static int r3_flash_program(struct retrode3_slot *slot,
         }
         if (old == target)
             continue;
-        err = r3_flash_unlock(slot);
-        if (err)
-            break;
+        /* EN29LV320CB unlock-bypass mode removes two AMD unlock
+         * command cycles for EACH following programmed word. Enter
+         * once per bounded ioctl chunk, after checking the actual chip
+         * identity and verifying the old word's 1->0 transition. */
+        if (!bypass) {
+            err = r3_flash_unlock(slot);
+            if (err)
+                break;
+            err = retrode3_flash_word_command(slot, 0xaaa, 0x0020);
+            if (err)
+                break;
+            bypass = true;
+        }
+        /* In bypass mode only the A0 setup and target word write are
+         * needed. Poll completion before issuing the next word. */
         err = retrode3_flash_word_command(slot, 0xaaa, 0x00a0);
         if (err)
             break;
@@ -328,6 +341,16 @@ static int r3_flash_program(struct retrode3_slot *slot,
         if (err)
             break;
         cond_resched();
+    }
+    /* The unlock-bypass escape is 90h, then 00h, rather than a
+     * generic F0h reset. Always exit even after partial failure.
+     * Follow with the regular array reset for the next ioctl/user. */
+    if (bypass) {
+        bypass_err = retrode3_flash_word_command(slot, 0, 0x0090);
+        if (!bypass_err)
+            bypass_err = retrode3_flash_word_command(slot, 0, 0x0000);
+        if (!err)
+            err = bypass_err;
     }
     reset_err = r3_flash_reset(slot);
     if (!err)
