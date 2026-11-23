@@ -136,6 +136,34 @@ each chunk, contributing extra CFI/autoselect overhead.
 device tests. Host-side Flash bench CI alone does not validate the
 kernel build, real throughput or GPIO read parity with prior ROM dumps.
 
+## One Flash identification per open device session
+
+The early implementation ran a complete CFI QRY + AMD autoselect
+identity read **before every 512-byte program ioctl**, even though the
+CLI had already identified the chip. This meant approximately 8192
+redundant CFI/ID sequences for a 4 MiB image. The MegaDrive Flash
+adapter also opened and closed `/dev/slot-md` on every 512-byte block.
+
+The Flash adapter now keeps one file descriptor open from the
+explicit Identify through Erase, Write and Verify. The kernel grants
+erase/program permission only to the **same open file descriptor**
+after a successful supported chip ID/CFI query. The authorization
+is automatically discarded on close and invalidated when the
+cartridge-detect polling worker sees a change. Each destructive
+operation still independently checks the currently selected MD
+slot, 5V setting, cartridge presence, exclusive kernel bus lock and
+incompatible GBx/legacy/FRAM modes. A different opener without
+its own successful Identify is rejected with ENODEV. No generic
+raw bus write ioctl was added, and there is no persistent global
+"Flash enabled" parameter.
+
+The CFI query still runs for the **initial explicit Flash ID of
+every job**, including erase-only. The user should not remove/replace
+cartridges while a job is active. The 50ms detect polling period
+does not guarantee protection against an unusually fast
+remove/reinsert between two samples; there is no independent
+physical cartridge identity signal for that case.
+
 ## MIPS module-only build
 
 Use the existing Arch/Podman MIPS builder and the prepared
