@@ -1,6 +1,7 @@
 # MegaDrive CFI bench on Retrode3 (Letux 7.3) - experimental
 
 **Branch:** `feature/md-flash-cfi-7.3` based on kernel `develop`,
+
 **Bus-direction fix (bench findings):** The DragonBox 4MB+RAM
 schematic (rev 2.0) uses 74LVC245 translators whose direction is
 controlled by the native MD `/OE` signal. The Retrode3's `oe` GPIO
