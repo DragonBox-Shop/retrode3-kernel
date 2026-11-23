@@ -45,7 +45,7 @@ static int retrode3_flash_word_command(struct retrode3_slot *slot,
 	gpiod_set_value(bus->we->desc[0], 0);
 	gpiod_set_value(bus->we->desc[1], 0);
 	gpiod_set_value(slot->ce, 0);
-	err = set_address(bus, byte_address);
+	err = (set_address)(bus, byte_address);
 	if (err)
 		goto out;
 	for (i = 0; i < 16; i++) {
@@ -167,7 +167,7 @@ static int retrode3_flash_cfi_query(struct retrode3_slot *slot,
 	for (i = 0; i < last; i++) {
 		int value;
 
-		err = set_address(bus, i * 2);
+		err = (set_address)(bus, i * 2);
 		if (err)
 			goto restore;
 		value = read_word(bus);
