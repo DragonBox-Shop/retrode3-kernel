@@ -148,46 +148,54 @@ unlock:
     return err;
 }
 
-/* Pending state is sampled until the exact expected array word becomes
- * readable; never trust a fixed delay. The timeout bounds driver blocking.
- * Busy erase cannot always be cancelled: wait for the completion window. */
-static int r3_flash_wait_word(struct retrode3_slot *slot, u32 address,
-                              u16 expected, unsigned timeout_ms)
+/* The chip signals embedded erase/program completion by stopping DQ6
+ * toggling. This is status polling, NOT full data verification.
+ * If DQ5 reports a possible timeout, sample DQ6 twice again as required
+ * by the EN29LV320C toggle-bit flowchart: DQ6 may have just stopped.
+ * Small word-program operations are not delayed by 40-80us sleeps;
+ * sector erase retains a short sleep to avoid busy-waiting. */
+static int r3_flash_wait_ready(struct retrode3_slot *slot, u32 address,
+                               unsigned timeout_ms)
 {
     unsigned long until = jiffies + msecs_to_jiffies(timeout_ms);
-    u16 previous, sample;
+    u16 previous = 0, sample = 0;
     int err;
 
     do {
-        /* DQ6 toggles while the EN29LV320C is busy. One coincidental
-         * read of expected data is not completion. Sample twice, then
-         * require both a stopped toggle bit AND exact array data. */
         err = r3_flash_array_word(slot, address, &previous);
         if (err)
             return err;
         err = r3_flash_array_word(slot, address, &sample);
         if (err)
             return err;
-        if (((previous ^ sample) & BIT(6)) == 0) {
-            if (sample == expected)
+        if (!((previous ^ sample) & BIT(6)))
+            return 0;
+        if (sample & BIT(5)) {
+            /* DQ5 timeout might race with command completion. */
+            err = r3_flash_array_word(slot, address, &previous);
+            if (err)
+                return err;
+            err = r3_flash_array_word(slot, address, &sample);
+            if (err)
+                return err;
+            if (!((previous ^ sample) & BIT(6)))
                 return 0;
             dev_warn(&slot->dev,
-                     "Flash poll: stable DQ6, unexpected data at 0x%08x: first=%04x next=%04x expected=%04x DQ5=%u\n",
+                     "Flash poll: DQ5 timeout at 0x%08x: DQ6 still toggling (%04x/%04x)\n",
                      address, (unsigned int)previous,
-                     (unsigned int)sample, (unsigned int)expected,
-                     !!(sample & BIT(5)));
+                     (unsigned int)sample);
             return -EIO;
         }
         if (time_after_eq(jiffies, until))
             break;
-        usleep_range(40, 80);
+        if (timeout_ms > 1000)
+            usleep_range(40, 80);
         cond_resched();
     } while (1);
     dev_warn(&slot->dev,
-             "Flash poll: timeout at 0x%08x: first=%04x next=%04x expected=%04x DQ5=%u\n",
+             "Flash poll: timeout at 0x%08x: first=%04x next=%04x DQ5=%u\n",
              address, (unsigned int)previous,
-             (unsigned int)sample, (unsigned int)expected,
-             !!(sample & BIT(5)));
+             (unsigned int)sample, !!(sample & BIT(5)));
     return -ETIMEDOUT;
 }
 
@@ -256,8 +264,8 @@ static int r3_flash_erase_sector(struct retrode3_slot *slot,
      * including repeat/paranoid passes, belongs to the CLI Verify phase.
      * This avoids 32,768 slow GPIO reads after each 64 KiB erase. */
     stage = "poll";
-    err = r3_flash_wait_word(slot, request->offset_bytes + length - 2,
-                             0xffff, 60000);
+    err = r3_flash_wait_ready(slot, request->offset_bytes + length - 2,
+                              60000);
 reset:
     reset_err = r3_flash_reset(slot);
     if (!err)
@@ -284,7 +292,7 @@ static int r3_flash_program(struct retrode3_slot *slot,
     struct retrode3_flash_id_v1 id = { 0 };
     struct retrode3_bus *bus = slot->bus;
     u32 i;
-    u16 old, target;
+    u16 target;
     int err, reset_err, bypass_err;
     bool bypass = false;
 
@@ -307,19 +315,11 @@ static int r3_flash_program(struct retrode3_slot *slot,
         u32 addr = request->offset_bytes + i;
         target = ((u16)request->data[i] << 8) |
                  request->data[i + 1]; /* MegaDrive file byte order */
-        err = r3_flash_array_word(slot, addr, &old);
-        if (err)
-            break;
-        if ((old & target) != target) {
-            err = -EUCLEAN; /* needs erase to set a bit back to 1 */
-            break;
-        }
-        if (old == target)
-            continue;
-        /* EN29LV320CB unlock-bypass mode removes two AMD unlock
-         * command cycles for EACH following programmed word. Enter
-         * once per bounded ioctl chunk, after checking the actual chip
-         * identity and verifying the old word's 1->0 transition. */
+        /* Program directly: no extra old-ROM read or per-word content
+         * check. Write-only on a non-erased chip can still fail according
+         * to Flash status; a requested full Verify checks ROM contents
+         * only AFTER all programming is complete. Unlock bypass removes
+         * two command cycles per word after entry. */
         if (!bypass) {
             err = r3_flash_unlock(slot);
             if (err)
@@ -337,7 +337,7 @@ static int r3_flash_program(struct retrode3_slot *slot,
         err = retrode3_flash_word_command(slot, addr, target);
         if (err)
             break;
-        err = r3_flash_wait_word(slot, addr, target, 1000);
+        err = r3_flash_wait_ready(slot, addr, 1000);
         if (err)
             break;
         cond_resched();
