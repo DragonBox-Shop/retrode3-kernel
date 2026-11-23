@@ -21,7 +21,7 @@ struct retrode3_flash_cfi_query_v1 {
 	__u32 abi_version;	/* input: 1 */
 	__u32 flags;		/* input: 0; reserved */
 	__u32 bus_width_bits;	/* output: 16 */
-	__u32 query_bytes;	/* output: 128 */
+	__u32 query_bytes;	/* output: valid prefix, at most 128 */
 	__u8 data[RETRODE3_FLASH_CFI_QUERY_BYTES];
 };
 
