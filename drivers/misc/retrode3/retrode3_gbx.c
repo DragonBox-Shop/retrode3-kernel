@@ -190,8 +190,10 @@ static int retrode3_gbx_gba_read16(struct retrode3_bus *bus, u32 byte_addr)
 		set_bus_bit(bus->addrs->desc[GBX_HIGH_DATA_FIRST + i],
 			    (word_addr >> (16 + i)) & 1);
 	set_word(bus, (u16)word_addr);
+	/* All 24 address bits must settle before /CS_ROM latches them. */
+	udelay(2);
 	set_bus_bit(bus->addrs->desc[GBX_CS_ROM], 0);
-	udelay(1);
+	udelay(2);
 	end_drive_word(bus);
 	set_bus_bit(bus->addrs->desc[GBX_RD], 0);
 	udelay(1);
