@@ -107,7 +107,8 @@ static int retrode3_flash_check_slot(struct retrode3_slot *slot)
 		return voltage_direction;
 	if (voltage_direction != 0)
 		return -EPERM;
-	power_level = gpiod_get_value(slot->power);
+	/* This GPIO is provided by a sleep-capable controller. */
+	power_level = gpiod_get_value_cansleep(slot->power);
 	if (power_level < 0)
 		return power_level;
 	if (power_level != 0)
@@ -137,7 +138,9 @@ static int retrode3_flash_check_slot(struct retrode3_slot *slot)
 
 /*
  * CFI word address 0x55 -> MD byte address 0xAA. CFI query table word
- * address N -> byte address 2*N. Require 00xx query words (x16 mode).
+ * address N -> byte address 2*N. Only D0..D7 carry the CFI byte;
+ * D8..D15 must not be treated as validity bits. The standard CFI
+ * signature begins at word 0x10; skip reserved words below that.
  * Always send 0xF0 and release the bus even when QRY is missing.
  */
 static int retrode3_flash_cfi_query(struct retrode3_slot *slot,
@@ -146,6 +149,7 @@ static int retrode3_flash_cfi_query(struct retrode3_slot *slot,
 	struct retrode3_bus *bus = slot->bus;
 	int err, cleanup, reset_err = 0;
 	unsigned int i, last = 0x2d;
+	u16 signature_words[3] = { 0 };
 	bool command_attempted = false;
 
 	if (!mutex_trylock(&bus->select_lock))
@@ -175,7 +179,7 @@ static int retrode3_flash_cfi_query(struct retrode3_slot *slot,
 		goto restore;
 	udelay(1);
 	gpiod_set_value(slot->ce, 1);
-	for (i = 0; i < last; i++) {
+	for (i = 0x10; i < last; i++) {
 		int value;
 
 		err = (set_address)(bus, i * 2);
@@ -186,23 +190,20 @@ static int retrode3_flash_cfi_query(struct retrode3_slot *slot,
 			err = value;
 			goto restore;
 		}
-		if (value & 0xff00) {
-			dev_warn(&slot->dev,
-				 "CFI bench: high data lane at word 0x%02x: 0x%04x\n",
-				 i, (unsigned int)value);
-			err = -ENODEV;
-			goto restore;
-		}
+		/* The upper byte is unspecified in this x16 query transport.
+		 * Check the signature using only the CFI data byte. */
+		if (i <= 0x12)
+			signature_words[i - 0x10] = (u16)value;
 		reply->data[i] = (u8)value;
 		if (i == 0x12 &&
 		    (reply->data[0x10] != 'Q' ||
 		     reply->data[0x11] != 'R' ||
 		     reply->data[0x12] != 'Y')) {
 			dev_warn(&slot->dev,
-				 "CFI bench: no QRY signature: %02x %02x %02x\n",
-				 (unsigned int)reply->data[0x10],
-				 (unsigned int)reply->data[0x11],
-				 (unsigned int)reply->data[0x12]);
+				 "CFI bench: no QRY at 0x10..0x12: %04x %04x %04x\n",
+				 (unsigned int)signature_words[0],
+				 (unsigned int)signature_words[1],
+				 (unsigned int)signature_words[2]);
 			err = -ENODEV;
 			goto restore;
 		}

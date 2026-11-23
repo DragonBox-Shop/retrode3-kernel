@@ -12,7 +12,9 @@ no other occupied slot, it checks that the native MD connector is set to
 5 V, takes the
 driver's select mutex, issues **exactly one CFI query command**
 (`word 0x55 := 0x0098`), reads up to 128 x16 query words (low byte only),
-checks `QRY`, then writes `0x00F0` to word 0 for reset.
+checks the lower-byte `QRY` at word addresses 0x10..0x12, then writes
+`0x00F0` to word 0 for reset. Reserved words 0x00..0x0f are not read;
+the high byte of an x16 query word is ignored, not treated as an error.
 Both write lanes pulse together for full 16-bit commands. All error paths
 attempt reset if entry was attempted, then release data GPIOs and CS.
 
@@ -33,6 +35,9 @@ The existing GBx, SMS and normal ROM read/write paths are unchanged.
   with version 1 and zero flags.
 - MD slot with 16-bit data, correct compatible, data GPIOs and control
   pins must be present. Physical cartridge-detect must be active.
+- The 5-V power GPIO may be on a sleep-capable controller. Query it using
+  `gpiod_get_value_cansleep()` in the process-context diagnostic,
+  avoiding a gpiolib WARN_ON.
 - 5 V must already be selected on the native MD connector (power GPIO
   output low). Both direction and logical level are checked; negative
   GPIO errors never count as a valid voltage. The ioctl never changes voltage.
@@ -105,7 +110,8 @@ dmesg | tail -n 30
 ```
 
 If the `QRY` test fails or the CFI region sizes are inconsistent, stop:
-inspect the new `CFI bench:` kernel diagnostics, then validate the bus
+inspect the new `CFI bench:` kernel diagnostics, including raw x16 words
+at the QRY addresses when identification fails, then validate the bus
 waveforms and board-level power. Do not attempt generic bus writes or
 Flash erase; do not blindly retry at another voltage.
 
