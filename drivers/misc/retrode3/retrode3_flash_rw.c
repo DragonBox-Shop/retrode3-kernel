@@ -99,8 +99,10 @@ static int r3_flash_identify(struct retrode3_slot *slot,
     if (total != R3_FLASH_SIZE)
         return -ENODEV;
 
-    if (!mutex_trylock(&bus->select_lock))
-        return -EBUSY;
+    /* A concurrent short kernel-side bus operation is not a cartridge
+     * fault. Wait for the mutex instead of spuriously failing mid-job. */
+    if (mutex_lock_interruptible(&bus->select_lock))
+        return -ERESTARTSYS;
     err = retrode3_flash_check_slot(slot);
     if (err)
         goto unlock;
@@ -210,8 +212,7 @@ static int r3_flash_erase_sector(struct retrode3_slot *slot,
 {
     struct retrode3_flash_id_v1 id = { 0 };
     struct retrode3_bus *bus = slot->bus;
-    u32 length, offset;
-    u16 word = 0;
+    u32 length;
     int err, reset_err;
     const char *stage = "validate-sector";
 
@@ -225,8 +226,10 @@ static int r3_flash_erase_sector(struct retrode3_slot *slot,
                  request->offset_bytes, err);
         return err;
     }
-    if (!mutex_trylock(&bus->select_lock))
-        return -EBUSY;
+    /* A concurrent short kernel-side bus operation is not a cartridge
+     * fault. Wait for the mutex instead of spuriously failing mid-job. */
+    if (mutex_lock_interruptible(&bus->select_lock))
+        return -ERESTARTSYS;
     stage = "slot-check";
     err = retrode3_flash_check_slot(slot);
     if (err)
@@ -248,29 +251,13 @@ static int r3_flash_erase_sector(struct retrode3_slot *slot,
     if (err)
         goto reset;
 
-    /* Sector erase can be much slower than program. Poll the last word
-     * and then independently check EVERY word is really erased. */
+    /* The status-poll below establishes erase completion for this
+     * sector. Do NOT read back every word: a full image verification,
+     * including repeat/paranoid passes, belongs to the CLI Verify phase.
+     * This avoids 32,768 slow GPIO reads after each 64 KiB erase. */
     stage = "poll";
     err = r3_flash_wait_word(slot, request->offset_bytes + length - 2,
                              0xffff, 60000);
-    if (err)
-        goto reset;
-    stage = "verify-sector";
-    for (offset = request->offset_bytes;
-         offset < request->offset_bytes + length; offset += 2) {
-        err = r3_flash_array_word(slot, offset, &word);
-        if (err)
-            goto reset;
-        if (word != 0xffff) {
-            dev_warn(&slot->dev,
-                     "Flash erase: nonempty word at 0x%08x: %04x\n",
-                     offset, (unsigned int)word);
-            err = -EIO;
-            goto reset;
-        }
-        if ((offset & 0x1ff) == 0)
-            cond_resched();
-    }
 reset:
     reset_err = r3_flash_reset(slot);
     if (!err)
@@ -307,8 +294,10 @@ static int r3_flash_program(struct retrode3_slot *slot,
     err = r3_flash_identify(slot, &id);
     if (err)
         return err;
-    if (!mutex_trylock(&bus->select_lock))
-        return -EBUSY;
+    /* A concurrent short kernel-side bus operation is not a cartridge
+     * fault. Wait for the mutex instead of spuriously failing mid-job. */
+    if (mutex_lock_interruptible(&bus->select_lock))
+        return -ERESTARTSYS;
     err = retrode3_flash_check_slot(slot);
     if (err)
         goto out;
