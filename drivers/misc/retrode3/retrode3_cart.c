@@ -187,7 +187,8 @@ static struct retrode3_slot *legacy_bridge_md_slot(struct retrode3_bus *bus)
 static ssize_t retrode3_read(struct file *file, char __user *buf,
 			size_t count, loff_t *ppos)
 {
-	struct retrode3_slot *slot = file->private_data;
+	struct retrode3_file_context *ctx = file->private_data;
+	struct retrode3_slot *slot = ctx->slot;
 	struct gpio_desc *bridge_md_ce = NULL;
 	bool is_md = of_device_is_compatible(slot->dev.of_node,
 			"openpandora,retrode3-slot-megadrive");
@@ -306,6 +307,51 @@ static ssize_t retrode3_read(struct file *file, char __user *buf,
 
 // if ((addr &0xff) == 0)
 // 	dev_info(&slot->dev, "%s: ppos=%08llx (fram=%d mode=%d addr=%x) count=%ld\n", __func__, *ppos, slot->fram_mode, mode, addr, count);
+
+#ifndef CONFIG_RETRODE3_BUFFER
+	/*
+	 * The x16 MegaDrive ROM read path also backs Flash Verify. Without
+	 * CONFIG_RETRODE3_BUFFER, the legacy loop below copy_to_user()'d
+	 * EVERY two-byte word. Read the same words with the same address/OE
+	 * timing, but copy one 1-KiB block to userspace at a time instead.
+	 * No change to GBx, byte-lane, FRAM, NES or SNES timing semantics.
+	 */
+	if (mode == MD_ROM && slot->bus_width == 16 && !slot->fram_mode &&
+	    !(addr & 1) && !(count & 1) && count >= 2) {
+		u8 words[1024];
+
+		while (count) {
+			size_t chunk = min_t(size_t, count, sizeof(words));
+			size_t j;
+
+			retrode3_cart_led_activity(slot);
+			for (j = 0; j < chunk; j += 2) {
+				int sampled;
+
+				err = _set_address(mode, slot, addr + j);
+				if (err < 0)
+					goto failed;
+				sampled = read_word(slot->bus);
+				if (sampled < 0) {
+					err = sampled;
+					goto failed;
+				}
+				words[j] = (u8)((u16)sampled >> 8);
+				words[j + 1] = (u8)sampled;
+			}
+			if (copy_to_user(buf + read, words, chunk)) {
+				err = -EFAULT;
+				goto failed;
+			}
+			read += chunk;
+			count -= chunk;
+			addr += chunk;
+			*ppos += chunk;
+		}
+		select_slot(slot->bus, NULL);
+		return read;
+	}
+#endif
 
 	while (count > 0) {
 		if (!(read & 0x3ff))
@@ -711,7 +757,8 @@ restore:
 static ssize_t retrode3_write(struct file *file, const char __user *buf,
 			 size_t count, loff_t *ppos)
 {
-	struct retrode3_slot *slot = file->private_data;
+	struct retrode3_file_context *ctx = file->private_data;
+	struct retrode3_slot *slot = ctx->slot;
 	uint32_t addr = *ppos & 0xffffff;	/* max address is 24 bit */
 	uint32_t mode = *ppos >> 24;		/* access mode control */
 	ssize_t written, sz;
@@ -1159,6 +1206,7 @@ static loff_t retrode3_lseek(struct file *file, loff_t offset, int orig)
 
 static int retrode3_open(struct inode *inode, struct file *file)
 {
+	struct retrode3_file_context *ctx;
 	struct retrode3_slot *slot;
 	int ret = 0;
 
@@ -1192,26 +1240,38 @@ static int retrode3_open(struct inode *inode, struct file *file)
 		return ret;
 	}
 
-	file->private_data = slot;
+	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
+	if (!ctx) {
+		put_device(&slot->dev);
+		return -ENOMEM;
+	}
+	ctx->slot = slot;
+	file->private_data = ctx;
 
 	return ret;
 }
 
 static int retrode3_release(struct inode *inode, struct file *file)
 {
-	struct retrode3_slot *slot = file->private_data;
+	struct retrode3_file_context *ctx = file->private_data;
+	struct retrode3_slot *slot = ctx->slot;
 
         dev_dbg(&slot->dev, "%s\n", __func__);
 
 	put_device(&slot->dev);
+	kfree(ctx);
 
 	return 0;
 }
+
+/* Optional x16 MD CFI bench ioctl. See retrode3_flash_ioctl.h. */
+#include "retrode3_flash.c"
 
 static const struct file_operations slot_fops = {
 	.llseek		= retrode3_lseek,
 	.read		= retrode3_read,
 	.write		= retrode3_write,
+	.unlocked_ioctl	= retrode3_flash_ioctl,
 	.open		= retrode3_open,
 	.release	= retrode3_release,
 };
@@ -1284,6 +1344,7 @@ int retrode3_probe_slot(struct retrode3_slot *slot, struct device_node *child)
 	}
 
 	slot->cd_state = -1;
+	atomic_set(&slot->cd_epoch, 0);
 	/* status-led points to a gpio-leds class device, not a status GPIO. */
 	if (of_property_present(child, "status-led")) {
 		scnprintf(slot->status_led_trigger_name,
@@ -1328,6 +1389,7 @@ static void retrode3_update_cd(struct retrode3_slot *slot)
 // printk("%s: state changed to %d\n", __func__, cd_state);
 
 		slot->cd_state = cd_state;
+		atomic_inc(&slot->cd_epoch);
 
 		led_trigger_event(slot->status_led_trigger,
 				  cd_state ? LED_FULL : LED_OFF);

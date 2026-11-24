@@ -1,0 +1,61 @@
+name: Retrode3 Flash CFI userspace bench syntax
+
+# This workflow DOES NOT build or validate retrode3.ko and does not access
+# cartridges. Physical MIPS module testing must use the prepared Letux
+# 7.3 kernel tree and matching Module.symvers.
+on:
+  push:
+    branches:
+      - feature/md-flash-cfi-7.3
+    paths:
+      - drivers/misc/retrode3/retrode3_flash*
+      - drivers/misc/retrode3/md_flash_cfi_bench.c
+      - drivers/misc/retrode3/md_flash_rw_bench.c
+      - .github/workflows/retrode3-flash-cfi.yml
+  pull_request:
+    branches:
+      - develop
+    paths:
+      - drivers/misc/retrode3/retrode3_flash*
+      - drivers/misc/retrode3/md_flash_cfi_bench.c
+      - .github/workflows/retrode3-flash-cfi.yml
+
+jobs:
+  bench-tool-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          filter: blob:none
+          sparse-checkout: |
+            drivers/misc/retrode3
+          sparse-checkout-cone-mode: true
+      - name: Build standalone CFI bench diagnostic with strict host GCC warnings
+        run: |
+          cc -std=gnu11 -O2 -Wall -Wextra -Werror -pedantic \
+            -Idrivers/misc/retrode3 \
+            drivers/misc/retrode3/md_flash_cfi_bench.c \
+            -o /tmp/md_flash_cfi_bench
+      - name: Tool refuses invocation without an explicit slot
+        run: |
+          set +e
+          /tmp/md_flash_cfi_bench >/tmp/bench.out 2>/tmp/bench.err
+          code=$?
+          set -e
+          test "$code" -eq 2
+          grep -Fq 'BENCH ONLY' /tmp/bench.err
+      - name: Build Flash read-write/verify bench with strict host GCC warnings
+        run: |
+          cc -std=gnu11 -O2 -Wall -Wextra -Werror -pedantic \
+            -Idrivers/misc/retrode3 \
+            drivers/misc/retrode3/md_flash_rw_bench.c \
+            -o /tmp/md_flash_rw_bench
+      - name: Flash bench rejects a write without a ROM source
+        run: |
+          set +e
+          /tmp/md_flash_rw_bench /dev/slot-md write \
+            >/tmp/rw.out 2>/tmp/rw.err
+          code=$?
+          set -e
+          test "$code" -eq 1
+          grep -Fq 'ROM source path' /tmp/rw.err

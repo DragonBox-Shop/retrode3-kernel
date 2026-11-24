@@ -13,6 +13,7 @@
 #ifndef _RETRODE3_SLOT_H
 #define _RETRODE3_SLOT_H
 
+#include <linux/atomic.h>
 #include <linux/cdev.h>
 #include <linux/device.h>
 #include <linux/err.h>
@@ -84,6 +85,7 @@ struct retrode3_slot {
 	struct gpio_desc *power;	// power control (optional)
 	struct delayed_work work;
 	int cd_state;
+	atomic_t cd_epoch; /* invalidates per-open Flash identity on cartridge transitions */
 	u32 addr_width;
 	u32 bus_width;
 // nur für Spezialisierung auf memory-slot
@@ -94,6 +96,15 @@ struct retrode3_slot {
 	struct retrode3_controller controllers[4];
 // nur für MD und FRAM
 	bool fram_mode;		// FRAM mode (SONIC3) has been activated through MD_MODE_ENSRAM
+};
+
+/* Each open slot FD gets its own Flash identity authorization.
+ * The validated chip cannot be reused by a different opener, and
+ * a cartridge-detect transition revokes it. */
+struct retrode3_file_context {
+	struct retrode3_slot *slot;
+	bool flash_identified;
+	int flash_cd_epoch;
 };
 
 /* retrode3 bus client match table */
