@@ -197,6 +197,17 @@ static ssize_t retrode3_read(struct file *file, char __user *buf,
 	uint32_t addr = *ppos & 0xffffff;	/* max address is 24 bit */
 	uint32_t mode = *ppos >> 24;		/* access mode control */
 	int err;
+	/* Snapshot the experimental controls once per read syscall. */
+	bool native_rom = mode == MD_ROM && !slot->fram_mode &&
+		((is_snes && slot->bus_width == 8) ||
+		 (is_md && slot->bus_width == 16));
+	bool bulk_address = native_rom && slot->bus->rom_addr_bulk_available &&
+		READ_ONCE(r3_rom_addr_bulk_gpio);
+	bool hold_oe = native_rom && is_snes &&
+		READ_ONCE(r3_rom_snes_oe_hold);
+	bool fast_delay = native_rom && is_snes &&
+		READ_ONCE(r3_rom_snes_fast_delay);
+	bool oe_held = false;
 
 	ssize_t read;
 	/* Small common buffer: avoid a 1 KiB stack frame and per-byte user copies. */
@@ -305,13 +316,23 @@ static ssize_t retrode3_read(struct file *file, char __user *buf,
 // 	dev_info(&slot->dev, "%s: ppos=%08llx (fram=%d mode=%d addr=%x) count=%ld\n", __func__, *ppos, slot->fram_mode, mode, addr, count);
 
 
+	/* The SNES experiment changes neither mapper nor chip-select handling.
+	 * Ensure the normal data bus is released before holding /OE low.
+	 */
+	if (hold_oe || fast_delay) {
+		err = set_bus_bit(slot->bus->oe, 1);
+		if (err)
+			goto failed;
+		end_drive_word(slot->bus);
+	}
+
 	while (count > 0) {
 		if (!((read + fill) & 0x3ff))
 			retrode3_cart_led_activity(slot);
 
 		if (mode == MD_ROM && slot->bus_width == 16 && count >= 2 && ((addr & 1) == 0)) {
 
-			err = _set_address(mode, slot, addr);	// 24 bit address and A0 determines lower/upper byte
+			err = retrode3_set_rom_address(slot->bus, addr, bulk_address);
 			if(err < 0)
 				goto failed;
 
@@ -413,10 +434,33 @@ static ssize_t retrode3_read(struct file *file, char __user *buf,
 			else { // 8 bit bus SNES or NES
 				switch (mode) {
 					case MD_ROM:
-						err = _set_address(mode, slot, addr);	// 24 bit address and A0 determines lower/upper byte
-						if(err < 0)
+						err = retrode3_set_rom_address(slot->bus, addr, bulk_address);
+						if (err < 0)
 							goto failed;
-						byte = err = read_half(slot->bus, 1);	// D0..D7
+						if (!hold_oe && !fast_delay) {
+							byte = err = read_half(slot->bus, 1);
+							break;
+						}
+						if (!oe_held) {
+							err = set_bus_bit(slot->bus->oe, 0);
+							if (err)
+								goto failed;
+							oe_held = true;
+						}
+						/* Settle after the final address transition. */
+						if (fast_delay)
+							ndelay(500);
+						else
+							udelay(1);
+						byte = err = get_half(slot->bus, 1);
+						if (err < 0)
+							goto failed;
+						if (!hold_oe) {
+							err = set_bus_bit(slot->bus->oe, 1);
+							if (err)
+								goto failed;
+							oe_held = false;
+						}
 						break;
 					case NES_PRG:
 /*
@@ -488,8 +532,17 @@ static unsigned char read_chr_byte(unsigned int address) {
 		 * offset only for bytes successfully copied to userspace.
 		 */
 		if (fill >= sizeof(buffer) - 1 || !count) {
-			size_t remaining = copy_to_user(buf + read, buffer, fill);
-			size_t copied = fill - remaining;
+			size_t remaining, copied;
+
+			/* Never leave /OE active across a possibly faulting user copy. */
+			if (oe_held) {
+				err = set_bus_bit(slot->bus->oe, 1);
+				if (err)
+					goto failed;
+				oe_held = false;
+			}
+			remaining = copy_to_user(buf + read, buffer, fill);
+			copied = fill - remaining;
 
 			read += copied;
 			*ppos += copied;
@@ -519,6 +572,8 @@ static unsigned char read_chr_byte(unsigned int address) {
 	return read;
 
 failed:
+	if (hold_oe || fast_delay)
+		set_bus_bit(slot->bus->oe, 1);
 	if (bridge_md_ce) {
 		int restore;
 

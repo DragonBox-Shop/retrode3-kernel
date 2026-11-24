@@ -68,7 +68,26 @@ module_param_named(rom_read_bulk_gpio, r3_rom_read_bulk_gpio, bool, 0600);
 MODULE_PARM_DESC(rom_read_bulk_gpio,
 	"X1600 PA8..PA23 single-register ROM reads (default off; 1=bench test)");
 
+/* Independent ROM-read experiments, never change Flash command timing. */
+static bool r3_rom_addr_bulk_gpio;
+module_param_named(rom_addr_bulk_gpio, r3_rom_addr_bulk_gpio, bool, 0600);
+MODULE_PARM_DESC(rom_addr_bulk_gpio,
+	"X1600 native MD/SNES ROM address bank SET/CLEAR (default off)");
+
+static bool r3_rom_snes_oe_hold;
+module_param_named(rom_snes_oe_hold, r3_rom_snes_oe_hold, bool, 0600);
+MODULE_PARM_DESC(rom_snes_oe_hold,
+	"SNES native ROM: hold /OE within each bounded read buffer (default off)");
+
+static bool r3_rom_snes_fast_delay;
+module_param_named(rom_snes_fast_delay, r3_rom_snes_fast_delay, bool, 0600);
+MODULE_PARM_DESC(rom_snes_fast_delay,
+	"SNES native ROM: request 500ns instead of 1us settle (default off)");
+
 #define R3_X1600_GPIOA_PIN_REG 0x00
+#define R3_ROM_GPIO_BANK_STRIDE 0x100
+#define R3_ROM_PAT0_SET 0x44
+#define R3_ROM_PAT0_CLEAR 0x48
 
 /*
  * Determine mapping ONCE at probe. Require all 16 active-high GPIOA
@@ -114,6 +133,45 @@ static void retrode3_probe_bulk_rom_reader(struct device *dev,
 		 !!READ_ONCE(r3_rom_read_bulk_gpio));
 }
 
+/*
+ * Only the exact native Retrode3 2.9.x X1600 address layout is accepted.
+ * Validate against actual descriptors, not just the board name. Older
+ * boards with A0 on PB30 and any unknown topology use the legacy path.
+ * PAT0 aliases affect only the requested address bits, never PA8..23
+ * data or any unrelated pins. The shared pinctrl regmap owns the bank.
+ */
+static void retrode3_probe_bulk_rom_address(struct device *dev,
+					    struct retrode3_bus *bus)
+{
+	struct gpio_chip *ga, *gb;
+	unsigned int i;
+
+	if (!bus->rom_read_bank_map || !bus->addrs ||
+	    bus->addrs->ndescs != 24)
+		return;
+	ga = bus->addrs->desc[0]->gdev->chip;
+	gb = bus->addrs->desc[16]->gdev->chip;
+	if (!ga || !gb || !ga->parent || ga->parent != gb->parent ||
+	    !ga->label || strcmp(ga->label, "GPIOA") ||
+	    !gb->label || strcmp(gb->label, "GPIOB") ||
+	    ga->ngpio != 32 || gb->ngpio != 32 ||
+	    dev_get_drvdata(ga->parent) != bus->rom_read_bank_map)
+		return;
+
+	for (i = 0; i < 24; i++) {
+		struct gpio_desc *desc = bus->addrs->desc[i];
+		unsigned int pin = i < 8 ? i : i < 16 ? i + 16 :
+				   i < 22 ? i - 4 : i - 3;
+
+		if (!desc || desc->gdev->chip != (i < 16 ? ga : gb) ||
+		    gpiod_hwgpio(desc) != pin || gpiod_is_active_low(desc))
+			return;
+	}
+	bus->rom_addr_bulk_available = true;
+	dev_info(dev, "X1600 PA/PB bulk ROM address available (rom_addr_bulk_gpio=%u)\n",
+		 !!READ_ONCE(r3_rom_addr_bulk_gpio));
+}
+
 /* GPIO_PIN is offset 0 in bank A for this exact X1600 pinctrl. */
 static inline int retrode3_bulk_rom_word(struct retrode3_bus *bus)
 {
@@ -157,25 +215,90 @@ static inline int set_bus_bit(struct gpio_desc *desc, int value)
 /* access to cart bus */
 
 static inline int set_address(struct retrode3_bus *bus, uint32_t addr)
-{ /* set address on all gpios */
-	int a;
-
-// printk("%s: bus %px addr %08x\n", __func__, bus, addr);
-
-	if (addr == bus->current_addr)
-		return 0;	// no real change
+{
+	int a, err;
+	u32 changed;
 
 	if (addr >= EOF)
 		return -EINVAL;
+	changed = bus->rom_addr_cache_dirty ? (u32)(EOF - 1) :
+					     addr ^ bus->current_addr;
+	if (!changed)
+		return 0;
 
 	for (a = 0; a < bus->addrs->ndescs; a++) {
-		if ((addr ^ bus->current_addr) & (1 << a))	{ // address bit has really changed
-// printk("%s: %d -> %d\n", __func__, a, (addr >> a) & 1);
-			set_bus_bit(bus->addrs->desc[a], (addr >> a) & 1);
+		if (changed & BIT(a)) {
+			err = set_bus_bit(bus->addrs->desc[a], (addr >> a) & 1);
+			if (err) {
+				bus->rom_addr_cache_dirty = true;
+				return err;
+			}
 		}
 	}
-
 	bus->current_addr = addr;
+	bus->rom_addr_cache_dirty = false;
+	return 0;
+}
+
+static inline u32 retrode3_rom_address_pa(u32 addr)
+{
+	return (addr & 0xffU) | ((addr & 0xff00U) << 16);
+}
+
+static inline u32 retrode3_rom_address_pb(u32 addr)
+{
+	return ((addr & 0x3f0000U) >> 4) | ((addr & 0xc00000U) >> 3);
+}
+
+static inline int retrode3_rom_address_bank(struct regmap *map,
+					   unsigned int base, u32 changed,
+					   u32 value)
+{
+	u32 clear = changed & ~value;
+	u32 set = changed & value;
+	int err;
+
+	if (clear) {
+		err = regmap_write(map, base + R3_ROM_PAT0_CLEAR, clear);
+		if (err)
+			return err;
+	}
+	if (set)
+		return regmap_write(map, base + R3_ROM_PAT0_SET, set);
+	return 0;
+}
+
+/* Native ROM reads only. No GBx, SMS, NES, Flash command or FRAM modes. */
+static inline int retrode3_set_rom_address(struct retrode3_bus *bus,
+					    u32 addr, bool bulk)
+{
+	u32 changed;
+	int err;
+
+	if (!bulk)
+		return set_address(bus, addr);
+	if (addr >= EOF)
+		return -EINVAL;
+	changed = bus->rom_addr_cache_dirty ? (u32)(EOF - 1) :
+					     addr ^ bus->current_addr;
+	if (!changed)
+		return 0;
+
+	err = retrode3_rom_address_bank(bus->rom_read_bank_map, 0,
+				      retrode3_rom_address_pa(changed),
+				      retrode3_rom_address_pa(addr));
+	if (!err && (changed & 0xff0000U))
+		err = retrode3_rom_address_bank(bus->rom_read_bank_map,
+					      R3_ROM_GPIO_BANK_STRIDE,
+					      retrode3_rom_address_pb(changed),
+					      retrode3_rom_address_pb(addr));
+	if (err) {
+		/* A partially applied bank update must never poison the cache. */
+		bus->rom_addr_cache_dirty = true;
+		return err;
+	}
+	bus->current_addr = addr;
+	bus->rom_addr_cache_dirty = false;
 	return 0;
 }
 
@@ -542,6 +665,7 @@ static int retrode3_probe(struct platform_device *pdev)
 
 	/* Mapping is cached at probe; never rediscover it per word. */
 	retrode3_probe_bulk_rom_reader(&pdev->dev, bus);
+	retrode3_probe_bulk_rom_address(&pdev->dev, bus);
 
 	bus->oe = devm_gpiod_get(&pdev->dev, "oe", GPIOD_OUT_HIGH);	// active LOW is XORed with DT definition
 // printk("%s: oe=%px\n", __func__, bus->oe);

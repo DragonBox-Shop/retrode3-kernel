@@ -45,6 +45,8 @@ struct retrode3_bus {
 	struct gpio_descs *datas;	// data-gpios
 	/* X1600 GPIOA PA8..PA23 input-bank snapshot; NULL = per-bit fallback. */
 	struct regmap *rom_read_bank_map;
+	bool rom_addr_bulk_available;
+	bool rom_addr_cache_dirty;
 	struct gpio_descs *we;		// we-gpios
 	struct gpio_desc *oe;		// oe-gpio
 	struct gpio_desc *time;		// time-gpio
