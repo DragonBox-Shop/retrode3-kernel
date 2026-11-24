@@ -44,7 +44,8 @@ static void retrode3_polling_work(struct work_struct *work)
 #endif
 	if (!mutex_trylock(&gbx_profile_lock))
 		goto reschedule;
-	if (gbx_md_test || slot->bus->gbx_active)
+	if (gbx_md_test || slot->bus->gbx_active ||
+	    mutex_is_locked(&slot->bus->select_lock))
 		goto unlock;
 	select_slot(slot->bus, slot);
 

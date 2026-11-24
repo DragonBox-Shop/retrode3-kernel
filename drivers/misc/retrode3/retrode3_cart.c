@@ -1233,7 +1233,13 @@ static ssize_t retrode3_scoped_read(struct file *file, char __user *buf,
 	ssize_t ret;
 
 	mutex_lock(&gbx_profile_lock);
-	ret = retrode3_read(file, buf, count, ppos);
+	/* A legacy raw sysfs session may own select_lock across calls.
+	 * Do not wait for it while holding the profile mutex.
+	 */
+	if (mutex_is_locked(&((struct retrode3_file_context *)file->private_data)->slot->bus->select_lock))
+		ret = -EBUSY;
+	else
+		ret = retrode3_read(file, buf, count, ppos);
 	mutex_unlock(&gbx_profile_lock);
 	return ret;
 }
@@ -1244,7 +1250,13 @@ static ssize_t retrode3_scoped_write(struct file *file, const char __user *buf,
 	ssize_t ret;
 
 	mutex_lock(&gbx_profile_lock);
-	ret = retrode3_write(file, buf, count, ppos);
+	/* A legacy raw sysfs session may own select_lock across calls.
+	 * Do not wait for it while holding the profile mutex.
+	 */
+	if (mutex_is_locked(&((struct retrode3_file_context *)file->private_data)->slot->bus->select_lock))
+		ret = -EBUSY;
+	else
+		ret = retrode3_write(file, buf, count, ppos);
 	mutex_unlock(&gbx_profile_lock);
 	return ret;
 }
@@ -1255,7 +1267,8 @@ static long retrode3_scoped_ioctl(struct file *file, unsigned int cmd,
 	long ret;
 
 	mutex_lock(&gbx_profile_lock);
-	ret = gbx_md_test ? -EBUSY : retrode3_flash_ioctl(file, cmd, arg);
+	ret = (gbx_md_test || mutex_is_locked(&((struct retrode3_file_context *)file->private_data)->slot->bus->select_lock)) ?
+		-EBUSY : retrode3_flash_ioctl(file, cmd, arg);
 	mutex_unlock(&gbx_profile_lock);
 	return ret;
 }
