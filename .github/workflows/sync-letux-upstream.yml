@@ -1,4 +1,4 @@
-name: Mirror Letux Linux kernel and report changes
+name: Track Letux Linux upstream SHA and request review
 
 on:
   schedule:
@@ -10,121 +10,94 @@ permissions:
   issues: write
 
 concurrency:
-  group: mirror-letux-upstream
+  group: track-letux-kernel-tip
   cancel-in-progress: false
 
 jobs:
-  mirror:
+  track:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out the trusted Retrode3 workflow
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: true
-          fetch-depth: 1
-
-      - name: Fetch general Letux kernel and update isolated reference
+      - name: Compare upstream SHA and update lightweight tracking ref
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
+
+          # Do not fetch or push the multi-GB kernel object history for
+          # a nightly upstream-notification check.
           upstream=https://github.com/goldelico/letux-kernel.git
-          upstream_branch=refs/heads/letux-current
-          source_ref=refs/remotes/letux/letux-current
-          mirror_ref=refs/heads/upstream/letux-current
+          remote_ref=refs/heads/letux-current
+          tracking_branch=tracking/letux-current
+          tracking_file=.github/letux-current.sha
 
-          # First check the tip without downloading a huge kernel history
-          # when Nikolaus has not published anything new.
-          current_line=$(git ls-remote --exit-code "$upstream" "$upstream_branch")
-          current=$(printf '%s\n' "$current_line" | cut -f1)
-          [[ "$current" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          source_line=$(git ls-remote --exit-code "$upstream" "$remote_ref")
+          current=$(printf '%s\n' "$source_line" | cut -f1)
+          [[ "$current" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "Unexpected upstream SHA: $current" >&2
+            exit 1
+          }
 
-          previous=
-          if previous_line=$(git ls-remote --exit-code --heads origin "$mirror_ref"); then
-            previous=$(printf '%s\n' "$previous_line" | cut -f1)
-            [[ "$previous" =~ ^[0-9a-f]{40}$ ]] || exit 1
-          fi
+          # Small tracking branch. GitHub Contents API creates a server-side
+          # commit with one changed SHA file. No kernel Git pack upload.
+          meta=$(gh api "repos/$GITHUB_REPOSITORY/contents/$tracking_file?ref=tracking%2Fletux-current")
+          blob_sha=$(printf '%s' "$meta" | jq -r '.sha')
+          previous=$(printf '%s' "$meta" | jq -r '.content' |
+            tr -d '\n' | base64 --decode | tr -d '\r\n')
+          [[ "$previous" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "Invalid tracking SHA: $previous" >&2
+            exit 1
+          }
+          [[ "$blob_sha" =~ ^[0-9a-f]{40}$ ]] || exit 1
+
           if [ "$current" = "$previous" ]; then
             echo "Letux kernel unchanged: $current" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
-          # Do not use --filter=blob:none or a shallow --depth=N here!
-          # A blobless/shallow tip can be inspected, but pushing it to
-          # another, independent GitHub repository needs the missing
-          # objects. On this repo, it previously failed with:
-          # upload-pack: not our ref / remote unpack: missing object.
-          # Unlike the original code, this fetch is complete.
-          git fetch --no-tags "$upstream" "+$upstream_branch:$source_ref"
-          fetched=$(git rev-parse "$source_ref")
-          if [ "$fetched" != "$current" ]; then
-            echo "Letux branch changed during fetch; retry in a fresh run" >&2
-            exit 1
-          fi
-
+          title="Review Letux Linux: ${previous:0:12} -> ${current:0:12}"
           report="$RUNNER_TEMP/letux-kernel-review.md"
-          if [ -n "$previous" ]; then
-            {
-              echo '# Letux Linux: new upstream revision'
-              echo
-              echo 'Source: goldelico/letux-kernel, branch letux-current'
-              printf 'Previous mirror: %s\nCurrent upstream: %s\n' \
-                "$previous" "$current"
-              echo
-              echo "Compare: https://github.com/$GITHUB_REPOSITORY/compare/$previous...$current"
-              echo
-              echo '## Changes (first 100 commits)'
-              echo '~~~text'
-              if git cat-file -e "$previous^{commit}" 2>/dev/null; then
-                git log --no-merges -n 100 --format='%h %s' \
-                  "$previous..$current"
-              else
-                echo 'Previous tip is not in upstream history; review the complete diff.'
-                git log --no-merges -n 30 --format='%h %s' "$current"
-              fi
-              echo '~~~'
-              echo
-              if git cat-file -e "$previous^{commit}" 2>/dev/null &&
-                 git merge-base --is-ancestor "$previous" "$current"; then
-                echo 'Fast-forward detected. Review before integration.'
-              else
-                echo '**Attention:** upstream history may have diverged or been rewritten.'
-                echo 'Review the selected kernel base before any merge.'
-              fi
-              echo
-              echo 'Never merge this mirror into develop/master automatically.'
-              echo 'Preserve our Retrode3 driver, DTS/DTSI and kernel config.'
-              echo 'Build and hardware-test each kernel update separately.'
-            } > "$report"
+          {
+            echo '# New Letux Linux kernel source revision'
+            echo
+            echo 'Source: goldelico/letux-kernel, branch letux-current'
+            echo
+            printf 'Previous observed SHA: %s\nCurrent SHA: %s\n' \
+              "$previous" "$current"
+            echo
+            echo "Old source: https://github.com/goldelico/letux-kernel/commit/$previous"
+            echo "New source: https://github.com/goldelico/letux-kernel/commit/$current"
+            echo "Compare if histories permit: https://github.com/goldelico/letux-kernel/compare/$previous...$current"
+            echo
+            echo '**Source-only notification.** No kernel objects have been'
+            echo 'copied into DragonBox-Shop/retrode3-kernel. Download the'
+            echo 'selected pinned upstream revision from goldelico only'
+            echo 'when preparing a reviewed integration branch.'
+            echo
+            echo 'Keep Retrode3 module, DTS/DTSI and configuration ours.'
+            echo 'No automatic merge into develop or master.'
+          } > "$report"
+
+          # Reuse an existing issue from the previously failing mirror
+          # workflow rather than creating more duplicate review issues.
+          if gh issue list --repo "$GITHUB_REPOSITORY" --state all \
+             --limit 200 --json title --jq '.[].title' |
+             grep -Fqx "$title"; then
+            echo "Review issue already exists: $title" >> "$GITHUB_STEP_SUMMARY"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" \
+              --title "$title" --body-file "$report"
           fi
 
-          # Push before reporting success. A failed push must not create
-          # another duplicate review issue on every nightly retry.
-          # --no-thin avoids relying on missing receiver objects.
-          if [ -n "$previous" ]; then
-            git push --no-thin --force-with-lease="$mirror_ref:$previous" origin \
-              "+$source_ref:$mirror_ref"
-          else
-            git push --no-thin --force-with-lease="$mirror_ref:" origin \
-              "+$source_ref:$mirror_ref"
-          fi
-          echo "Mirror updated: $mirror_ref -> $current" >> "$GITHUB_STEP_SUMMARY"
+          # The blob SHA provides optimistic-concurrency protection.
+          # A racing write cannot silently overwrite a newer state.
+          encoded=$(printf '%s\n' "$current" | base64 -w0)
+          gh api --method PUT \
+            "repos/$GITHUB_REPOSITORY/contents/$tracking_file" \
+            -f message="ci: track Letux Linux $current" \
+            -f branch="$tracking_branch" \
+            -f sha="$blob_sha" \
+            -f content="$encoded" >/dev/null
 
-          if [ -n "$previous" ]; then
-            title="Review Letux Linux: ${previous:0:12} -> ${current:0:12}"
-            # A previous failed implementation could have created an issue
-            # before its unsuccessful push. Reuse it rather than duplicating.
-            if gh issue list --repo "$GITHUB_REPOSITORY" --state all \
-               --limit 100 --search "$title" --json title \
-               --jq '.[].title' | grep -Fqx "$title"; then
-              echo "Review issue already exists: $title" >> "$GITHUB_STEP_SUMMARY"
-            else
-              gh issue create --repo "$GITHUB_REPOSITORY" \
-                --title "$title" --body-file "$report"
-            fi
-            cat "$report" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo 'Initial Letux kernel mirror: no retrospective issue.' \
-              >> "$GITHUB_STEP_SUMMARY"
-          fi
+          echo "Tracked Letux kernel: $previous -> $current" >> "$GITHUB_STEP_SUMMARY"
+          cat "$report" >> "$GITHUB_STEP_SUMMARY"
