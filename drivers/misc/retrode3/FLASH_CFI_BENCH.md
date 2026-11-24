@@ -236,6 +236,69 @@ Retain the module from the verified **13.3 KiB/s** revision as a
 rollback. Only after the device verifies should any further
 optimization be considered.
 
+## Experimental X1600 GPIOA bulk direction and data writes
+
+**Confirmed live results:** the paired-/OE change and direct single-bit
+setter did not change the user's measured **13.3 KiB/s Write**.
+The complete Flash Verify still passed. Therefore the status-read
+setup was not the material speed bottleneck.
+
+Inspection of the **actual Retrode 2.9.5 device tree** found that
+every D0..D15 is on the same X1600 GPIO controller bank A, mapped to
+**PA8..PA23**, so these lines can be switched as one 16-bit bitmask.
+The x1600 pinctrl driver normally performs multiple regmap writes
+and a shadow-load **separately for each pin** on every input/output
+transition. That is likely much more expensive than the /OE
+toggle cycle.
+
+This next optimization is **NOT enabled by default**. A root-only
+kernel parameter allows hardware testing:
+
+```sh
+# On the Retrode3, ONLY after loading a test .ko and BEFORE Write:
+echo 1 > /sys/module/retrode3/parameters/flash_bulk_gpio
+cat /sys/module/retrode3/parameters/flash_bulk_gpio
+# Expect: Y
+```
+
+Only when the live GPIO topology matches all the following criteria
+does this bypass the individual direction calls: parent controller
+compatible with `ingenic,x1600-pinctrl`, GPIO chip label `GPIOA`,
+exactly 16 active-high GPIO descriptors on that same chip, and
+hardware pin offsets 8..23 in order. If anything does not match,
+the driver falls back to the old, already-verified per-pin GPIO path
+and warns once. Check `dmesg` for **"Flash bulk GPIO: ... fast path
+active"**. The fast path uses the **existing pinctrl driver's regmap
+from the GPIO chip parent**, not an independently mapped physical
+register area. It preloads PAT0 levels while the data lines are
+inputs, applies pinctrl's X1600 shadow INT-clear/MSK-set/PAT1 output
+or input operation for all 16 lines in one bitmask, and triggers the
+same GPIOA shadow load. /OE, /WE and /CE remain inactive while changing
+direction, and the data lines return to input **before any Flash
+status read**. Errors are propagated and the normal per-pin cleanup
+is attempted if a bulk direction operation fails.
+
+The X1600 shadow staging registers are shared with the normal
+pinctrl driver. While the Flash bus is exclusively locked during a
+job, this experiment is **not a general replacement for pinctrl**,
+and should never be used without the exact board/kernel match.
+No other Retrode core, SRAM or ROM-read path is modified. No
+userspace ABI changes; matched CLI and Web versions remain usable.
+
+**Still untested**: compiling the new code with the prepared MIPS
+kernel tree, physical bus/electrical behavior, Write/Verify correctness,
+and throughput with `flash_bulk_gpio=1`. Back up and keep the known
+13.3 KiB/s kernel module. Begin with a spare Flash cartridge and a
+small ROM, perform Erase + Write + full Verify before a long image,
+then measure. To disable the experiment without changing binaries:
+
+```sh
+echo 0 > /sys/module/retrode3/parameters/flash_bulk_gpio
+```
+
+Do not merge into `develop` or `master` until a successful physical
+test, and do not enable this experimental mode on shipping images.
+
 ## MIPS module-only build
 
 Use the existing Arch/Podman MIPS builder and the prepared
