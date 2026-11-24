@@ -1,10 +1,14 @@
-# Native ROM address and SNES timing experiments
+# Native ROM address and SNES timing optimizations
 
-Branch based on the tested buffer-cleanup candidate. All new flags default
-OFF. No change to the OSCR core, userspace HAL, CLI, Web UI, GBA direction
-handling, NES mapper timing, SMS transport, Flash command/status sequences,
-or FRAM access. No changes to the pinctrl driver or device tree.
+Hardware feedback for test commit 15fe208b8376d5240bc4be3486eba9630391e6c5:
+SNES reads approximately 10–15 times faster with all test options on,
+with correct CRC. NES, SMS and MegaDrive reported working without issues.
+Reducing SNES settling delay to 500 ns made no meaningful speed difference,
+so that experiment and its parameter have been removed. Keep the original
+1 us settling delay. The three retained flags now default ON; the final
+default-on module still requires a build/load smoke test.
 
+* rom_read_bulk_gpio: X1600 PA8..23 data-bank snapshot (see ROM_BULK_READ_TEST.md).
 * rom_addr_bulk_gpio: native MD aligned word and SNES byte ROM reads only.
   Uses the same X1600 shared regmap as the data-read path. PA address bits
   0..7,24..31 and PB 12..17,19..20 are validated against all 24 descriptors
@@ -13,25 +17,24 @@ or FRAM access. No changes to the pinctrl driver or device tree.
   Unknown topology retains per-bit access. A failed update marks the address
   cache dirty so the next successful address set drives every address bit.
 * rom_snes_oe_hold: SNES mode 0 only; /OE stays active during address
-  increments, with original 1us delay unless the separate delay flag is on.
+  increments, with the original 1 us settling delay after each address.
   /OE is inactive before user copy, error cleanup and slot deselection.
   Existing legacy bridge CE high-Z handling is retained.
-* rom_snes_fast_delay: SNES mode 0 only; requests ndelay(500) instead of
-  udelay(1). Actual delay depends on MIPS implementation and hardware.
-  Not a claim that this timing is supported by every cartridge.
 
-Hardware A/B test with known-good normal SNES and MD carts, one cartridge
-at a time, no populated adapter in another slot. Record elapsed time,
-full ROM SHA256/CRC32, and compare against independent known-good dumps.
-Do not use an untested combination for saves/flash programming.
+All three parameters remain root-readable/writable (0600) in
+/sys/module/retrode3/parameters/. Set each to 0 for the legacy path or 1
+for the optimized path. Change settings only between completed cartridge
+operations, under the shared userspace cartridge bus lock. Future protected
+Advanced/Debug settings may expose this exact allowlist. Runtime sysfs
+changes do not persist across module reloads unless applied again.
 
-All flags are root writable. Between complete reads, with no operation
-running, set rom_read_bulk_gpio=1 and the three new flags to 0.
-Run baseline, then enable each new flag individually (others 0),
-then combine only individually validated flags, then baseline again.
-Keep Flash command timing, NES timing and legacy read paths unchanged.
-Verify MegaDrive CRC with address acceleration off/on, and NES
-CRC regression. If any mismatch, disable the corresponding flag.
+No changes to OSCR cores, userspace HAL, CLI, Web UI, GBx direction handling,
+NES mapper timing, SMS transport, Flash command/status sequences or FRAM
+access. The existing Flash bulk write parameter is unchanged.
 
-The new module is source-only until built against the matching prepared
-kernel and validated on real hardware. Do not overwrite installed module.
+For regression testing use known-good normal carts, one at a time,
+compare full ROM CRC/SHA256 and elapsed time with an independent reference
+and with the optimized paths disabled. Broader cartridge coverage,
+GBx integration and independent Flash verification remain separate tests.
+Build only the module against the matching prepared target kernel tree.
+Do not overwrite the installed module before verifying the new build.

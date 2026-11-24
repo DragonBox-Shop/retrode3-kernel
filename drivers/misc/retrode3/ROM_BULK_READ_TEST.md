@@ -1,10 +1,10 @@
 # X1600 GPIOA ROM bulk-read experiment
 
-**Development branch:** `develop` (the former Flash/ROM feature branches
-have been consolidated). It includes the hardware-verified ~37 kB/s
-X1600 bulk Flash **write** transport. The ROM-read path remains
-**disabled by default** and needs real-hardware verification before
-enabling it by default or moving the changes into `master`.
+The X1600 bulk ROM data-read path is **enabled by default** after
+successful MD, SNES, NES and SMS hardware feedback. It remains independently
+configurable. See ROM_ADDRESS_TIMING_TEST.md for the additional native ROM
+address and continuous SNES OE optimizations. The existing hardware-verified
+~37 kB/s X1600 bulk Flash write transport is unchanged.
 
 ## Motivation and source evidence
 
@@ -32,7 +32,7 @@ flash status polling and flash program transport are unchanged.
 The return type in `read_half()` is corrected to `int` so a
 GPIO failure isn't silently truncated to an 8-bit data value.
 
-## Toggle on target (default OFF)
+## Toggle on target (default ON)
 
 The **same test kernel module** can be used for A/B comparisons:
 
@@ -54,9 +54,10 @@ cat /sys/module/retrode3/parameters/rom_read_bulk_gpio
 echo 0 > /sys/module/retrode3/parameters/rom_read_bulk_gpio
 ```
 
-The optimized mode remains **OFF by default** until physical hardware
-verification confirms read parity across supported cores. The setting
-is root-writable (mode 0600) and is not exposed through Web UI or CLI.
+The optimized mode defaults to ON. The setting is root-writable (mode
+0600) for regression comparisons and future protected Advanced/Debug settings.
+It is not yet exposed through the Web UI or CLI. Toggle only between complete
+operations under the shared cartridge bus lock.
 
 ## Hardware acceptance
 
@@ -84,14 +85,14 @@ is root-writable (mode 0600) and is not exposed through Web UI or CLI.
    a written spare Flash cart with mode **0** as well and compare the
    resulting full image.
 
-This implementation intentionally does **not** optimize `set_address()` yet:
-it spans several X1600 banks and may have system-specific control
-effects. Avoid changing address timing alongside the data snapshot
-until the read-path experiment has passed real-device tests.
+The native MD/SNES address optimization is now a separate configurable
+path, documented in ROM_ADDRESS_TIMING_TEST.md. It does not change NES
+mapper control or Flash command timing.
 
 ## Deployment status
 
-Source implementation only. The GitHub userspace Flash bench CI, if
-present, **does not build or validate the changed MIPS kernel module**.
-Before merging, compile the kernel module against the target tree and
-complete the hardware acceptance checks above.
+The original test module has been tested on real hardware as described
+in ROM_ADDRESS_TIMING_TEST.md. The default-on follow-up requires a module-only
+build and load smoke test; broader cartridge and independent Flash acceptance
+checks above remain useful. GitHub userspace CI does not validate the MIPS
+kernel module.

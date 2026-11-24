@@ -60,29 +60,24 @@ MODULE_PARM_DESC(gbx_md_test,
 /*
  * Hardware-guarded ROM-read experiment: one GPIOA PIN snapshot can
  * replace 8 or 16 per-bit GPIO reads on the X1600.
- * Default OFF until MD, SNES, NES and adapter ROM reads pass hardware
- * comparison tests. Independent from the verified Flash write fast path.
+ * Default ON after successful native MD/SNES/NES and SMS hardware tests.
+ * Independent from the verified Flash write fast path.
  */
-static bool r3_rom_read_bulk_gpio;
+static bool r3_rom_read_bulk_gpio = true;
 module_param_named(rom_read_bulk_gpio, r3_rom_read_bulk_gpio, bool, 0600);
 MODULE_PARM_DESC(rom_read_bulk_gpio,
-	"X1600 PA8..PA23 single-register ROM reads (default off; 1=bench test)");
+	"X1600 PA8..PA23 single-register ROM reads (default on; 0=per-pin fallback)");
 
-/* Independent ROM-read experiments, never change Flash command timing. */
-static bool r3_rom_addr_bulk_gpio;
+/* Independently configurable ROM-read optimizations. */
+static bool r3_rom_addr_bulk_gpio = true;
 module_param_named(rom_addr_bulk_gpio, r3_rom_addr_bulk_gpio, bool, 0600);
 MODULE_PARM_DESC(rom_addr_bulk_gpio,
-	"X1600 native MD/SNES ROM address bank SET/CLEAR (default off)");
+	"X1600 native MD/SNES ROM address bank SET/CLEAR (default on)");
 
-static bool r3_rom_snes_oe_hold;
+static bool r3_rom_snes_oe_hold = true;
 module_param_named(rom_snes_oe_hold, r3_rom_snes_oe_hold, bool, 0600);
 MODULE_PARM_DESC(rom_snes_oe_hold,
-	"SNES native ROM: hold /OE within each bounded read buffer (default off)");
-
-static bool r3_rom_snes_fast_delay;
-module_param_named(rom_snes_fast_delay, r3_rom_snes_fast_delay, bool, 0600);
-MODULE_PARM_DESC(rom_snes_fast_delay,
-	"SNES native ROM: request 500ns instead of 1us settle (default off)");
+	"SNES native ROM: hold /OE within each bounded read buffer (default on)");
 
 #define R3_X1600_GPIOA_PIN_REG 0x00
 #define R3_ROM_GPIO_BANK_STRIDE 0x100
