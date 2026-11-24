@@ -8,11 +8,113 @@
 #include <linux/jiffies.h>
 #include <linux/sched.h>
 #include <linux/errno.h>
+#include <linux/regmap.h>
 
 #define R3_FLASH_SIZE           4194304U
 #define R3_FLASH_BOOT_SIZE      65536U
 #define R3_FLASH_SMALL_SECTOR    8192U
 #define R3_FLASH_LARGE_SECTOR   65536U
+
+/*
+ * Explicitly opt-in x1600 GPIOA PA8..PA23 bulk direction experiment.
+ *
+ * The normal gpiod method remains the DEFAULT, hardware-proven path.
+ * X1600 pinctrl-ingenic uses a shared regmap; the *same* regmap is
+ * returned via the GPIO chip parent driver's data. These register
+ * offsets are intentionally limited to the confirmed X1600 layout.
+ * Do not try to use these offsets on an unknown SoC/GPIO controller.
+ */
+static bool r3_flash_bulk_gpio;
+module_param_named(flash_bulk_gpio, r3_flash_bulk_gpio, bool, 0600);
+MODULE_PARM_DESC(flash_bulk_gpio,
+                 "Experimental X1600 PA8..PA23 Flash GPIO bulk write (default off)");
+
+#define R3_X1600_PA_DATA_MASK   GENMASK(23, 8)
+#define R3_X1600_PAT0_SET       0x44
+#define R3_X1600_PAT0_CLEAR     0x48
+#define R3_X1600_SHADOW_INT_CLR 0x718
+#define R3_X1600_SHADOW_MSK_SET 0x724
+#define R3_X1600_SHADOW_DIR_SET 0x734
+#define R3_X1600_SHADOW_DIR_CLR 0x738
+#define R3_X1600_SHADOW_LOAD    0x7f0
+
+/*
+ * Runtime guard for the known Retrode3 X1600 wiring. No direct MMIO,
+ * no pointer to unowned registers and no pin overrides outside PA8..23.
+ * The pinctrl driver has an initialized regmap stored on gc->parent.
+ */
+static struct regmap *r3_flash_bulk_regmap(struct retrode3_slot *slot)
+{
+    struct gpio_descs *data = slot->bus->datas;
+    struct gpio_chip *gc;
+    int i;
+
+    if (!r3_flash_bulk_gpio || !data || data->ndescs != 16)
+        return NULL;
+
+    gc = data->desc[0]->gdev->chip;
+    if (!gc || !gc->parent || !gc->parent->of_node ||
+        !of_device_is_compatible(gc->parent->of_node,
+                                 "ingenic,x1600-pinctrl") ||
+        !gc->label || strcmp(gc->label, "GPIOA") ||
+        gc->ngpio != 32 || !gc->set)
+        return NULL;
+
+    for (i = 0; i < 16; ++i) {
+        struct gpio_desc *desc = data->desc[i];
+
+        if (!desc || desc->gdev->chip != gc ||
+            gpiod_hwgpio(desc) != 8 + i ||
+            gpiod_is_active_low(desc))
+            return NULL;
+    }
+
+    return dev_get_drvdata(gc->parent);
+}
+
+/*
+ * Set both 16-bit data levels while every /CE and /WE is inactive.
+ * PAT0 SET/CLEAR are write-only bitmasked registers on GPIO bank A.
+ */
+static int r3_flash_bulk_data(struct regmap *map, u16 value)
+{
+    u32 high = (u32)value << 8;
+    int err;
+
+    err = regmap_write(map, R3_X1600_PAT0_SET, high);
+    if (err)
+        return err;
+    return regmap_write(map, R3_X1600_PAT0_CLEAR,
+                        R3_X1600_PA_DATA_MASK & ~high);
+}
+
+/*
+ * The X1600 pinctrl driver changes each pin's direction using
+ * INT clear, MSK set, PAT1 input/output, then a shadow load.
+ * Reproduce precisely that sequence using one 16-pin mask. regmap
+ * is shared with pinctrl, avoiding an independently mapped register
+ * region. The cartridge output must be disabled BEFORE this call.
+ */
+static int r3_flash_bulk_direction(struct regmap *map, bool input)
+{
+    int err;
+
+    err = regmap_write(map, R3_X1600_SHADOW_INT_CLR,
+                       R3_X1600_PA_DATA_MASK);
+    if (err)
+        return err;
+    err = regmap_write(map, R3_X1600_SHADOW_MSK_SET,
+                       R3_X1600_PA_DATA_MASK);
+    if (err)
+        return err;
+    err = regmap_write(map, input ? R3_X1600_SHADOW_DIR_SET :
+                                 R3_X1600_SHADOW_DIR_CLR,
+                       R3_X1600_PA_DATA_MASK);
+    if (err)
+        return err;
+    return regmap_write(map, R3_X1600_SHADOW_LOAD, 0);
+}
+
 
 static int r3_flash_array_word(struct retrode3_slot *slot,
                                u32 addr, u16 *out)
@@ -108,7 +210,8 @@ restore:
  * Do not use for CFI, erase, SRAM, legacy adapters or other cartridges.
  */
 static int r3_flash_bypass_program_word(struct retrode3_slot *slot,
-                                         u32 addr, u16 target)
+                                         u32 addr, u16 target,
+                                         struct regmap *bulk)
 {
     struct retrode3_bus *bus = slot->bus;
     int i, err, cleanup;
@@ -125,11 +228,22 @@ static int r3_flash_bypass_program_word(struct retrode3_slot *slot,
     err = (set_address)(bus, 0xaaa);
     if (err)
         goto release;
-    for (i = 0; i < 16; i++) {
-        err = gpiod_direction_output(bus->datas->desc[i],
-                                     !!(setup & BIT(i)));
+    if (bulk) {
+        /* Preload every data bit while PA8..23 are still high impedance.
+         * Only after the value is stable, switch all 16 to outputs. */
+        err = r3_flash_bulk_data(bulk, setup);
         if (err)
             goto release;
+        err = r3_flash_bulk_direction(bulk, false);
+        if (err)
+            goto release;
+    } else {
+        for (i = 0; i < 16; i++) {
+            err = gpiod_direction_output(bus->datas->desc[i],
+                                         !!(setup & BIT(i)));
+            if (err)
+                goto release;
+        }
     }
     udelay(1);
     gpiod_set_value(slot->ce, 1);
@@ -146,12 +260,17 @@ static int r3_flash_bypass_program_word(struct retrode3_slot *slot,
     err = (set_address)(bus, addr);
     if (err)
         goto release;
-    for (i = 0; i < 16; i++) {
-        if ((setup ^ target) & BIT(i))
-            /* Data bits are active-high raw lines. This matches
-             * get_bus_bit() and the existing direct address GPIO path;
-             * /CE and /WE are inactive during these updates. */
-            set_bus_bit(bus->datas->desc[i], !!(target & BIT(i)));
+    if (bulk) {
+        err = r3_flash_bulk_data(bulk, target);
+        if (err)
+            goto release;
+    } else {
+        for (i = 0; i < 16; i++) {
+            if ((setup ^ target) & BIT(i))
+                /* Data bits are active-high raw lines. This matches
+                 * get_bus_bit() and the existing direct address path. */
+                set_bus_bit(bus->datas->desc[i], !!(target & BIT(i)));
+        }
     }
     udelay(1);
     gpiod_set_value(slot->ce, 1);
@@ -167,7 +286,21 @@ release:
     gpiod_set_value(bus->we->desc[0], 0);
     gpiod_set_value(bus->we->desc[1], 0);
     gpiod_set_value(slot->ce, 0);
-    cleanup = retrode3_flash_release_data(bus);
+    if (bulk) {
+        cleanup = r3_flash_bulk_direction(bulk, true);
+        if (cleanup) {
+            /* Never sample status unless all outputs are released.
+             * The existing GPIO API offers a safe fallback on error. */
+            int recovered = retrode3_flash_release_data(bus);
+
+            if (recovered)
+                dev_err(&slot->dev,
+                        "Flash bulk GPIO recovery failed: %d\n",
+                        recovered);
+        }
+    } else {
+        cleanup = retrode3_flash_release_data(bus);
+    }
     if (!err)
         err = cleanup;
     return err;
@@ -429,6 +562,7 @@ static int r3_flash_program(struct retrode3_file_context *ctx,
 {
     struct retrode3_slot *slot = ctx->slot;
     struct retrode3_bus *bus = slot->bus;
+    struct regmap *bulk;
     u32 i;
     u16 target;
     int err, reset_err, bypass_err;
@@ -447,6 +581,7 @@ static int r3_flash_program(struct retrode3_file_context *ctx,
     err = r3_flash_check_session(ctx);
     if (err)
         goto out;
+    bulk = r3_flash_bulk_regmap(slot);
 
     for (i = 0; i < request->length; i += 2) {
         u32 addr = request->offset_bytes + i;
@@ -469,7 +604,7 @@ static int r3_flash_program(struct retrode3_file_context *ctx,
         /* One paired A0/data sequence, then DQ6/DQ5 completion polling.
          * The helper releases all 16 outputs before the Flash drives
          * status data. Never issue the next word while DQ6 toggles. */
-        err = r3_flash_bypass_program_word(slot, addr, target);
+        err = r3_flash_bypass_program_word(slot, addr, target, bulk);
         if (err)
             break;
         err = r3_flash_wait_ready(slot, addr, 1000);
