@@ -238,12 +238,15 @@
 		linux,default-trigger = "retrode3-slot-md";
 		default-state = "off";
 		function = LED_FUNCTION_PROGRAMMING;
-		function-enumerator = <2>;	// match slot number
+		/* Preserve the older-board LED wiring and sysfs numbering. */
 #if APPLICATION < 294
+		function-enumerator = <2>;
 		gpios = <&gpb 8 GPIO_ACTIVE_HIGH>;
 		color = <LED_COLOR_ID_GREEN>;
 #else
-		gpios = <&exp_leds 5 GPIO_ACTIVE_HIGH>;
+		/* Verified on Retrode 2.9.5: programming-0 is the MD LED. */
+		function-enumerator = <0>;
+		gpios = <&exp_leds 4 GPIO_ACTIVE_HIGH>;
 		color = <LED_COLOR_ID_BLUE>;
 #endif
 	};
@@ -252,12 +255,14 @@
 		linux,default-trigger = "retrode3-slot-nes";
 		default-state = "off";
 		function = LED_FUNCTION_PROGRAMMING;
-		function-enumerator = <1>;	// match slot number
 #if APPLICATION < 294
+		function-enumerator = <1>;
 		gpios = <&gpb 9 GPIO_ACTIVE_HIGH>;
 		color = <LED_COLOR_ID_GREEN>;
 #else
-		gpios = <&exp_leds 6 GPIO_ACTIVE_HIGH>;
+		/* Verified on Retrode 2.9.5: programming-2 is the NES LED. */
+		function-enumerator = <2>;
+		gpios = <&exp_leds 5 GPIO_ACTIVE_HIGH>;
 		color = <LED_COLOR_ID_BLUE>;
 #endif
 	};
@@ -268,12 +273,14 @@
 		linux,default-trigger = "retrode3-slot-snes";
 		default-state = "off";
 		function = LED_FUNCTION_PROGRAMMING;
-		function-enumerator = <0>;	// match slot number
 #if APPLICATION < 294
+		function-enumerator = <0>;
 		gpios = <&gpb 10 GPIO_ACTIVE_HIGH>;
 		color = <LED_COLOR_ID_GREEN>;
 #else
-		gpios = <&exp_leds 4 GPIO_ACTIVE_HIGH>;
+		/* Verified on Retrode 2.9.5: programming-1 is the SNES LED. */
+		function-enumerator = <1>;
+		gpios = <&exp_leds 6 GPIO_ACTIVE_HIGH>;
 		color = <LED_COLOR_ID_BLUE>;
 #endif
 	};
