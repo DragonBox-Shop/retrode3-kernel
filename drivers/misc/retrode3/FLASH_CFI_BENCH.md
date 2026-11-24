@@ -236,12 +236,16 @@ Retain the module from the verified **13.3 KiB/s** revision as a
 rollback. Only after the device verifies should any further
 optimization be considered.
 
-## Experimental X1600 GPIOA bulk direction and data writes
+## Validated X1600 GPIOA bulk direction and data writes (default on)
 
 **Confirmed live results:** the paired-/OE change and direct single-bit
-setter did not change the user's measured **13.3 KiB/s Write**.
-The complete Flash Verify still passed. Therefore the status-read
-setup was not the material speed bottleneck.
+setter did not change the measured **13.3 KiB/s Write**.
+After enabling grouped GPIOA direction/data writes, the user reported
+about **37 kB/s Write**, with **multiple complete, successful Flash
+Write + Verify hardware tests**. The status-read setup therefore was
+not the main performance bottleneck; the pin-direction overhead was
+substantial. The bulk path is now the hardware-validated default on
+boards with the exact X1600 GPIOA D0..D15 mapping.
 
 Inspection of the **actual Retrode 2.9.5 device tree** found that
 every D0..D15 is on the same X1600 GPIO controller bank A, mapped to
@@ -251,14 +255,15 @@ and a shadow-load **separately for each pin** on every input/output
 transition. That is likely much more expensive than the /OE
 toggle cycle.
 
-This next optimization is **NOT enabled by default**. A root-only
-kernel parameter allows hardware testing:
+This optimization is **enabled by default in the module**. No manual
+`echo 1` or boot-time configuration is needed on the confirmed X1600
+board. A root-only kernel parameter remains for debugging and
+compatibility testing:
 
 ```sh
-# On the Retrode3, ONLY after loading a test .ko and BEFORE Write:
-echo 1 > /sys/module/retrode3/parameters/flash_bulk_gpio
+# On the Retrode3 with the updated module:
 cat /sys/module/retrode3/parameters/flash_bulk_gpio
-# Expect: Y
+# Expect: Y (default)
 ```
 
 Only when the live GPIO topology matches all the following criteria
@@ -285,19 +290,24 @@ and should never be used without the exact board/kernel match.
 No other Retrode core, SRAM or ROM-read path is modified. No
 userspace ABI changes; matched CLI and Web versions remain usable.
 
-**Still untested**: compiling the new code with the prepared MIPS
-kernel tree, physical bus/electrical behavior, Write/Verify correctness,
-and throughput with `flash_bulk_gpio=1`. Back up and keep the known
-13.3 KiB/s kernel module. Begin with a spare Flash cartridge and a
-small ROM, perform Erase + Write + full Verify before a long image,
-then measure. To disable the experiment without changing binaries:
+**Hardware tested:** repeated successful programming and byte-for-byte
+Verify passes were reported with `flash_bulk_gpio=1`, measuring
+about 37 kB/s Write. The updated **default-on** module still needs the
+usual module-only MIPS build/deployment when pulled on other devices,
+and a regression check before shipping. Keep a known-good module backup.
+To disable bulk writes without changing binaries:
 
 ```sh
 echo 0 > /sys/module/retrode3/parameters/flash_bulk_gpio
 ```
 
-Do not merge into `develop` or `master` until a successful physical
-test, and do not enable this experimental mode on shipping images.
+The bulk path stays restricted to the validated X1600 GPIOA topology.
+The original per-pin implementation remains the automatic fallback
+when the hardware mapping differs, and can be forced by setting
+`flash_bulk_gpio=0`. This commit changes only the Flash programmer's
+**default selection**, not the regular ROM read path. Release-branch
+promotion remains a separate step; the feature PR is still a draft
+until final integration checks.
 
 ## MIPS module-only build
 
