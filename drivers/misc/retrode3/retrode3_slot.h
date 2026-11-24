@@ -103,6 +103,7 @@ struct retrode3_slot {
  * a cartridge-detect transition revokes it. */
 struct retrode3_file_context {
 	struct retrode3_slot *slot;
+	bool gbx_profile;
 	bool flash_identified;
 	int flash_cd_epoch;
 };

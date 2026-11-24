@@ -214,10 +214,12 @@ static ssize_t retrode3_read(struct file *file, char __user *buf,
 
 	read = 0;
 
-	if (retrode3_gbx_mode_is_read(mode))
+	if (retrode3_gbx_mode_is_read(mode)) {
+		if (!ctx->gbx_profile)
+			return -EBUSY;
 		return retrode3_gbx_read(slot, buf, count, ppos, mode);
-	/* The GBx bus swaps GPIO directions. Block all other transports while
-	 * armed or after its first use, even if the module parameter was reset. */
+	}
+	/* Only the scoped GBx transport may use its alternate GPIO directions. */
 	if (gbx_md_test || slot->bus->gbx_active)
 		return -EBUSY;
 
@@ -1196,6 +1198,9 @@ static int retrode3_open(struct inode *inode, struct file *file)
 		return -ENOMEM;
 	}
 	ctx->slot = slot;
+	ctx->gbx_profile = gbx_md_test && retrode3_gbx_md_slot(slot);
+	if (ctx->gbx_profile)
+		gbx_profile_users++;
 	file->private_data = ctx;
 
 	return ret;
@@ -1208,6 +1213,8 @@ static int retrode3_release(struct inode *inode, struct file *file)
 
         dev_dbg(&slot->dev, "%s\n", __func__);
 
+	if (ctx->gbx_profile)
+		gbx_profile_users--;
 	put_device(&slot->dev);
 	kfree(ctx);
 
@@ -1217,13 +1224,82 @@ static int retrode3_release(struct inode *inode, struct file *file)
 /* Optional x16 MD CFI bench ioctl. See retrode3_flash_ioctl.h. */
 #include "retrode3_flash.c"
 
+/* Profile transitions and all cartridge file operations share this lock.
+ * The existing slot mutex still owns physical chip selection.
+ */
+static ssize_t retrode3_scoped_read(struct file *file, char __user *buf,
+				    size_t count, loff_t *ppos)
+{
+	ssize_t ret;
+
+	mutex_lock(&gbx_profile_lock);
+	/* A legacy raw sysfs session may own select_lock across calls.
+	 * Do not wait for it while holding the profile mutex.
+	 */
+	if (mutex_is_locked(&((struct retrode3_file_context *)file->private_data)->slot->bus->select_lock))
+		ret = -EBUSY;
+	else
+		ret = retrode3_read(file, buf, count, ppos);
+	mutex_unlock(&gbx_profile_lock);
+	return ret;
+}
+
+static ssize_t retrode3_scoped_write(struct file *file, const char __user *buf,
+				     size_t count, loff_t *ppos)
+{
+	ssize_t ret;
+
+	mutex_lock(&gbx_profile_lock);
+	/* A legacy raw sysfs session may own select_lock across calls.
+	 * Do not wait for it while holding the profile mutex.
+	 */
+	if (mutex_is_locked(&((struct retrode3_file_context *)file->private_data)->slot->bus->select_lock))
+		ret = -EBUSY;
+	else
+		ret = retrode3_write(file, buf, count, ppos);
+	mutex_unlock(&gbx_profile_lock);
+	return ret;
+}
+
+static long retrode3_scoped_ioctl(struct file *file, unsigned int cmd,
+				  unsigned long arg)
+{
+	long ret;
+
+	mutex_lock(&gbx_profile_lock);
+	ret = (gbx_md_test || mutex_is_locked(&((struct retrode3_file_context *)file->private_data)->slot->bus->select_lock)) ?
+		-EBUSY : retrode3_flash_ioctl(file, cmd, arg);
+	mutex_unlock(&gbx_profile_lock);
+	return ret;
+}
+
+static int retrode3_scoped_open(struct inode *inode, struct file *file)
+{
+	int ret;
+
+	mutex_lock(&gbx_profile_lock);
+	ret = retrode3_open(inode, file);
+	mutex_unlock(&gbx_profile_lock);
+	return ret;
+}
+
+static int retrode3_scoped_release(struct inode *inode, struct file *file)
+{
+	int ret;
+
+	mutex_lock(&gbx_profile_lock);
+	ret = retrode3_release(inode, file);
+	mutex_unlock(&gbx_profile_lock);
+	return ret;
+}
+
 static const struct file_operations slot_fops = {
 	.llseek		= retrode3_lseek,
-	.read		= retrode3_read,
-	.write		= retrode3_write,
-	.unlocked_ioctl	= retrode3_flash_ioctl,
-	.open		= retrode3_open,
-	.release	= retrode3_release,
+	.read		= retrode3_scoped_read,
+	.write		= retrode3_scoped_write,
+	.unlocked_ioctl	= retrode3_scoped_ioctl,
+	.open		= retrode3_scoped_open,
+	.release	= retrode3_scoped_release,
 };
 
 // FIXME: duplicate to retrode3_release??

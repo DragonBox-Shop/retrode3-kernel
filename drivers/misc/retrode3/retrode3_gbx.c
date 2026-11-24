@@ -11,10 +11,9 @@
  * header probes; a previously identified GB/GBC can be read at 5 V.
  * GBA is restricted to 3.3 V by the kernel.
  *
- * As long as the bench mode has been used, A19 remains an INPUT:
- * GB audio/GBA IRQ are cartridge outputs. The driver refuses all normal
- * bus access afterwards until the module is reloaded with the adapter
- * removed. This is intentionally conservative for the first hardware test.
+ * While the scoped profile is enabled, GB audio/GBA IRQ remains an input
+ * and other bus users are excluded. Disabling the profile restores native
+ * GPIO directions only after all GBx file descriptors have closed.
  */
 
 /*
@@ -77,11 +76,15 @@ static int retrode3_gbx_prepare(struct retrode3_bus *bus, bool gba)
 	gpiod_set_value(bus->time, 0);
 	end_drive_word(bus);
 
+	/* Mark changed state before the first direction operation, including
+	 * partial failures, so profile exit always attempts recovery.
+	 */
+	bus->gbx_active = true;
+	bus->rom_addr_cache_dirty = true;
 	/* A19 is GB audio or GBA IRQ: never drive it in GBx mode. */
 	ret = gpiod_direction_input(bus->addrs->desc[GBX_AUDIO_IRQ]);
 	if (ret)
 		return ret;
-	bus->gbx_active = true;
 
 	/* /RD, /CS, /WR and reset/CS_RAM: set inactive (HIGH). */
 	ret = gpiod_direction_output(bus->addrs->desc[GBX_RD], 1);
@@ -124,7 +127,7 @@ static int retrode3_gbx_prepare(struct retrode3_bus *bus, bool gba)
 			return ret;
 	}
 	retrode3_gbx_idle(bus);
-	bus->current_addr = EOF - 1; /* invalidate normal MD address cache */
+	bus->rom_addr_cache_dirty = true; /* invalidate native address cache */
 	return 0;
 }
 
@@ -446,10 +449,8 @@ static ssize_t retrode3_gbx_read(struct retrode3_slot *slot,
 	err = 0;
 out:
 	/*
-	 * Leave ALL shared GB data/GBA upper-address lines and GPIO20
-	 * (cart audio/IRQ) high-Z after every operation, including arm.
-	 * Keep /WR inactive HIGH and do not restore normal MD address
-	 * outputs while the GBx bench is armed.
+	 * Keep shared GB data/GBA upper-address lines and audio/IRQ high-Z
+	 * between reads. Native directions are restored on profile exit.
 	 */
 	retrode3_gbx_idle(bus);
 	end_drive_word(bus);
@@ -459,7 +460,43 @@ out:
 		for (pin = GBX_DIAG_FIRST; pin <= GBX_AUDIO_IRQ; ++pin)
 			gpiod_direction_input(bus->addrs->desc[pin]);
 	}
-	bus->current_addr = EOF - 1;
+	bus->rom_addr_cache_dirty = true;
 	select_slot(bus, NULL);
 	return completed ? (ssize_t)completed : err;
+}
+
+/* Profile exit, with both locks held and no GBx file open. Leave the
+ * GBx control pins inactive during the transition, all native selects
+ * deasserted and the data bus released. Native reads subsequently set
+ * their own address; the cache is invalidated even on partial failure.
+ */
+static int retrode3_gbx_restore(struct retrode3_bus *bus)
+{
+	u32 idle = BIT(GBX_RD) | BIT(GBX_CS_ROM) |
+		   BIT(GBX_WR) | BIT(GBX_CS_RAM);
+	int i, err;
+
+	bus->rom_addr_cache_dirty = true;
+	gpiod_set_value(bus->oe, 0);
+	gpiod_set_value(bus->we->desc[0], 0);
+	gpiod_set_value(bus->we->desc[1], 0);
+	gpiod_set_value(bus->time, 0);
+	for (i = 0; i < ARRAY_SIZE(bus->slots); i++)
+		if (bus->slots[i])
+			gpiod_set_value(bus->slots[i]->ce, 0);
+	retrode3_gbx_idle(bus);
+	for (i = 0; i < bus->datas->ndescs; i++) {
+		err = gpiod_direction_input(bus->datas->desc[i]);
+		if (err)
+			return err;
+	}
+	for (i = 0; i < bus->addrs->ndescs; i++) {
+		err = gpiod_direction_output(bus->addrs->desc[i], !!(idle & BIT(i)));
+		if (err)
+			return err;
+	}
+	bus->current_addr = idle;
+	bus->rom_addr_cache_dirty = false;
+	bus->gbx_active = false;
+	return 0;
 }

@@ -42,6 +42,11 @@ static void retrode3_polling_work(struct work_struct *work)
 	alternative: just write to some /sys/.../nopoll
 	and always cancel the worker but (re)start only if polling is intended
 #endif
+	if (!mutex_trylock(&gbx_profile_lock))
+		goto reschedule;
+	if (gbx_md_test || slot->bus->gbx_active ||
+	    mutex_is_locked(&slot->bus->select_lock))
+		goto unlock;
 	select_slot(slot->bus, slot);
 
 	/* SEGA controller
@@ -61,7 +66,7 @@ static void retrode3_polling_work(struct work_struct *work)
 		w = read_word(slot->bus);	// D0..D5 are Controller 1 and D8..D13 Controller 2
 		if(w < 0) { // invalid read
 			select_slot(slot->bus, NULL);
-			return;
+			goto unlock;
 		}
 		for (i=0; i<2; i++)
 			word[i] = (word[i] << 8) | ((w >> slot->controllers[i].data_offset) & 0x3f);
@@ -94,7 +99,7 @@ static void retrode3_polling_work(struct work_struct *work)
 // printk("%s %d: %x %llx %llx\n", __func__, line, w, word[2], word[3]);
 		if(w < 0) { // invalid read
 			select_slot(slot->bus, NULL);
-			return;
+			goto unlock;
 		}
 		for (i = 2; i < 4; i++) {
 			word[i] = (word[i] << 1) | ((w >> slot->controllers[i].data_offset) & 0x1);
@@ -174,7 +179,9 @@ static void retrode3_polling_work(struct work_struct *work)
 		c->state_valid = true;
 	}
 	select_slot(slot->bus, NULL);
-
+unlock:
+	mutex_unlock(&gbx_profile_lock);
+reschedule:
 	schedule_delayed_work(&slot->work, POLL_RATE);	// start next check
 }
 
