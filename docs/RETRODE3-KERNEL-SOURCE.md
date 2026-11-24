@@ -6,6 +6,9 @@
 > `project-retrode3-v2`-Branches wird eingestellt. Der allgemeine
 > Letux-Kernel bleibt als unveränderter Upstream-Referenzstand erhalten.
 > Siehe [KERNEL-BRANCH-WORKFLOW.md](KERNEL-BRANCH-WORKFLOW.md).
+> Seit 24.11.2026 erfasst `tracking/letux-current` lediglich die
+> aktuelle Quell-SHA, nicht mehr die vollstaendige Letux-Kernelhistorie.
+> Der alte Branch `upstream/letux-current` wird nicht mehr synchronisiert.
 > Die folgenden Abschnitte dokumentieren auch ältere Teststände und
 > sind keine aktuellen Release-Freigaben.
 

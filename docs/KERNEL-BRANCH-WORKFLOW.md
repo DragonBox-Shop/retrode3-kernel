@@ -30,28 +30,37 @@ kernel/DTB/.ko builds needlessly complicated.
 
 | Branch | Purpose | Automatic updates |
 | --- | --- | --- |
-| `upstream/letux-current` | Mirror of generic Nikolaus Linux | Nightly only |
+| `tracking/letux-current` | Small source-SHA history of Nikolaus' `letux-current` tip | Nightly SHA commit only |
+| `upstream/letux-current` | Legacy full-source mirror at its last successful commit | No automatic updates |
 | `develop` | Reviewed Retrode3 driver, DTS and config development | Never |
 | `master` | Hardware-tested release source, immutable until approval | Never |
 | `integration/*` | Temporary kernel-version upgrades/rebases for testing | Never |
 | `feature/*` | Small isolated changes and their tests | Never |
 | `archive/*` | Read-only preserved historical tips if needed | Never |
 
-`upstream/letux-current` is a moving **reference**, not the input for
-an uncontrolled build or automatic merge into `develop` or `master`.
-Each image manifest must pin the exact selected Git commit SHA.
-Do not rewrite published release history.
+`tracking/letux-current` contains `.github/letux-current.sha`: the last
+observed Git SHA from Nikolaus. It is **not** a copy of the kernel
+objects and is **not** a kernel source branch. Fetch a selected pinned
+Letux commit from the original source as needed for an integration build.
+The older `upstream/letux-current` ref is retained only as historical
+source provenance, and its tip must not be interpreted as current.
+Each image manifest must pin the exact selected kernel integration
+SHA and, when relevant, its exact Letux upstream base SHA. Do not
+rewrite published release history.
 
 ## Nightly synchronization
 
 Only `.github/workflows/sync-letux-upstream.yml` should remain active.
-It fetches the public `goldelico/letux-kernel:letux-current`, advances
-only `upstream/letux-current`, and creates a review issue when the
-upstream SHA changes. It never compiles upstream code or merges patches.
+The workflow uses a cheap `git ls-remote` query against
+`goldelico/letux-kernel:letux-current`, then updates only the SHA file
+on `tracking/letux-current` via the GitHub Contents API. It opens a
+review issue when the SHA changes and reuses existing issues by exact
+title. It **does not** mirror the multi-gigabyte Linux history and does
+not merge or compile code. This avoids failed kernel-pack pushes to
+our independent GitHub repository (HTTP 500 / missing Git objects).
 Schedule: 03:23 UTC daily, with a manual `workflow_dispatch` option.
-Scheduled workflows run from GitHub's **default branch**, currently
-`master`. Until the new workflow is merged into `master`, the workflow
-policy in this feature PR is *not* the active nightly configuration.
+Scheduled workflows run from GitHub's **default branch** (`master`).
+The tracking branch contains no workflow execution policy of its own.
 
 The former `.github/workflows/sync-retrode3-upstream.yml` mirrored
 the in-repository `project-retrode3-v2` branch. This is no longer
@@ -61,8 +70,10 @@ automatically delete its source or mirror branch.
 
 ## Kernel upgrade procedure
 
-1. Review the mirror's reported upstream commit and select an exact
-   Letux kernel release/tag or explicitly approved commit as base.
+1. Review the tracked Letux SHA and select an exact Letux kernel
+   release/tag or explicitly approved commit as base. Fetch that
+   commit from the original Letux Git remote into an integration
+   worktree when actually preparing the kernel version upgrade.
    A newer moving `letux-current` snapshot is **not** by itself
    a release decision.
 2. Branch from `develop` as `integration/letux-VERSION`. Check the
