@@ -26,6 +26,8 @@ dazu retrode3_device mit Pointer auf den bus
 
 #include "retrode3_bus.h"
 #include <linux/delay.h>
+#include <linux/regmap.h>
+#include <linux/string.h>
 
 /*
  * TEMPORARY BENCH TEST, disabled by default.  The shared CLI can switch
@@ -55,6 +57,76 @@ static bool gbx_md_test;
 module_param_named(gbx_md_test, gbx_md_test, bool, 0644);
 MODULE_PARM_DESC(gbx_md_test,
 	"BENCH ONLY: GBx-0011 MD bus cycles (modes 23/24/25), no cart writes");
+/*
+ * Hardware-guarded ROM-read experiment: one GPIOA PIN snapshot can
+ * replace 8 or 16 per-bit GPIO reads on the X1600.
+ * Default OFF until MD, SNES, NES and adapter ROM reads pass hardware
+ * comparison tests. Independent from the verified Flash write fast path.
+ */
+static bool r3_rom_read_bulk_gpio;
+module_param_named(rom_read_bulk_gpio, r3_rom_read_bulk_gpio, bool, 0600);
+MODULE_PARM_DESC(rom_read_bulk_gpio,
+	"X1600 PA8..PA23 single-register ROM reads (default off; 1=bench test)");
+
+#define R3_X1600_GPIOA_PIN_REG 0x00
+
+/*
+ * Determine mapping ONCE at probe. Require all 16 active-high GPIOA
+ * descriptors in D0..D15 == PA8..PA23 order on an X1600 controller.
+ * The Ingenic pinctrl parent owns its regmap. This driver only reads
+ * the input GPIO_PIN register, not output values or pin directions.
+ */
+static void retrode3_probe_bulk_rom_reader(struct device *dev,
+					    struct retrode3_bus *bus)
+{
+	struct gpio_descs *datas = bus->datas;
+	struct gpio_chip *gc;
+	struct regmap *map;
+	int i;
+
+	if (!datas || datas->ndescs != 16)
+		return;
+
+	gc = datas->desc[0]->gdev->chip;
+	if (!gc || !gc->parent || !gc->parent->of_node ||
+	    !of_device_is_compatible(gc->parent->of_node,
+				     "ingenic,x1600-pinctrl") ||
+	    !gc->label || strcmp(gc->label, "GPIOA") ||
+	    gc->ngpio != 32 || !gc->get)
+		return;
+
+	for (i = 0; i < 16; i++) {
+		struct gpio_desc *desc = datas->desc[i];
+
+		if (!desc || desc->gdev->chip != gc ||
+		    gpiod_hwgpio(desc) != 8 + i ||
+		    gpiod_is_active_low(desc))
+			return;
+	}
+
+	map = dev_get_drvdata(gc->parent);
+	if (!map)
+		return;
+
+	bus->rom_read_bank_map = map;
+	dev_info(dev,
+		 "X1600 GPIOA PA8..PA23 bulk ROM read available (rom_read_bulk_gpio=%u)\n",
+		 !!READ_ONCE(r3_rom_read_bulk_gpio));
+}
+
+/* GPIO_PIN is offset 0 in bank A for this exact X1600 pinctrl. */
+static inline int retrode3_bulk_rom_word(struct retrode3_bus *bus)
+{
+	unsigned int bank;
+	int err;
+
+	err = regmap_read(bus->rom_read_bank_map, R3_X1600_GPIOA_PIN_REG,
+			  &bank);
+	if (err)
+		return err;
+	return (bank >> 8) & 0xffff;
+}
+
 /* low level address and data bus access */
 
 // FXIME: get_multiple / set_multiple could be much faster, if supported by device driver
@@ -113,6 +185,14 @@ static inline int get_half(struct retrode3_bus *bus, int a0)
 { /* read data from data lines D0..D7 (a0 = 1) or D8..D15 (a0 = 0) */
 	int d;
 	uint8_t data;
+
+	if (READ_ONCE(r3_rom_read_bulk_gpio) && bus->rom_read_bank_map) {
+		int word = retrode3_bulk_rom_word(bus);
+
+		if (word < 0)
+			return word;
+		return a0 ? (word & 0xff) : ((word >> 8) & 0xff);
+	}
 // printk("%s: a0=%d\n", __func__, a0);
 
 	/* read 8 data bits either on D0..D7 (a0 = 1) or D8..D15 (a0 = 0) */
@@ -141,7 +221,7 @@ static inline int get_half(struct retrode3_bus *bus, int a0)
 
 static inline int read_half(struct retrode3_bus *bus, int a0)
 { /* read data from data lines D0..D7 (a0 = 1) or D8..D15 (a0 = 0) with OE */
-	uint8_t data;
+	int data; /* Do not silently truncate a GPIO read error. */
 
 	set_bus_bit(bus->oe, 0);	// this is the pin level although we have defined "active low" in the DTS
 	/* Let ROM outputs and level shifters settle before sampling data. */
@@ -161,6 +241,9 @@ static inline int get_word(struct retrode3_bus *bus)
 { /* read data from data lines */
 	int d;
 	uint16_t data;
+
+	if (READ_ONCE(r3_rom_read_bulk_gpio) && bus->rom_read_bank_map)
+		return retrode3_bulk_rom_word(bus);
 
 // printk("%s:\n", __func__);
 
@@ -456,6 +539,9 @@ static int retrode3_probe(struct platform_device *pdev)
 			bus->datas->ndescs);
 		return -EINVAL;
 	}
+
+	/* Mapping is cached at probe; never rediscover it per word. */
+	retrode3_probe_bulk_rom_reader(&pdev->dev, bus);
 
 	bus->oe = devm_gpiod_get(&pdev->dev, "oe", GPIOD_OUT_HIGH);	// active LOW is XORed with DT definition
 // printk("%s: oe=%px\n", __func__, bus->oe);
