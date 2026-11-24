@@ -582,6 +582,14 @@ static int r3_flash_program(struct retrode3_file_context *ctx,
     if (err)
         goto out;
     bulk = r3_flash_bulk_regmap(slot);
+    if (r3_flash_bulk_gpio) {
+        if (bulk)
+            dev_info_once(&slot->dev,
+                          "Flash bulk GPIO: X1600 PA8..PA23 fast path active\n");
+        else
+            dev_warn_once(&slot->dev,
+                          "Flash bulk GPIO: unsupported GPIO mapping; using known-good per-pin path\n");
+    }
 
     for (i = 0; i < request->length; i += 2) {
         u32 addr = request->offset_bytes + i;
