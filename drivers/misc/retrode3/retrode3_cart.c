@@ -198,14 +198,10 @@ static ssize_t retrode3_read(struct file *file, char __user *buf,
 	uint32_t mode = *ppos >> 24;		/* access mode control */
 	int err;
 
-#ifndef CONFIG_RETRODE3_BUFFER
-	ssize_t read, sz;
-#else
 	ssize_t read;
-	unsigned long remaining;
-	unsigned char buffer[1024];
-	unsigned int fill = 0;
-#endif
+	/* Small common buffer: avoid a 1 KiB stack frame and per-byte user copies. */
+	u8 buffer[512];
+	size_t fill = 0;
 
 	read = 0;
 
@@ -308,60 +304,12 @@ static ssize_t retrode3_read(struct file *file, char __user *buf,
 // if ((addr &0xff) == 0)
 // 	dev_info(&slot->dev, "%s: ppos=%08llx (fram=%d mode=%d addr=%x) count=%ld\n", __func__, *ppos, slot->fram_mode, mode, addr, count);
 
-#ifndef CONFIG_RETRODE3_BUFFER
-	/*
-	 * The x16 MegaDrive ROM read path also backs Flash Verify. Without
-	 * CONFIG_RETRODE3_BUFFER, the legacy loop below copy_to_user()'d
-	 * EVERY two-byte word. Read the same words with the same address/OE
-	 * timing, but copy one 1-KiB block to userspace at a time instead.
-	 * No change to GBx, byte-lane, FRAM, NES or SNES timing semantics.
-	 */
-	if (mode == MD_ROM && slot->bus_width == 16 && !slot->fram_mode &&
-	    !(addr & 1) && !(count & 1) && count >= 2) {
-		u8 words[1024];
-
-		while (count) {
-			size_t chunk = min_t(size_t, count, sizeof(words));
-			size_t j;
-
-			retrode3_cart_led_activity(slot);
-			for (j = 0; j < chunk; j += 2) {
-				int sampled;
-
-				err = _set_address(mode, slot, addr + j);
-				if (err < 0)
-					goto failed;
-				sampled = read_word(slot->bus);
-				if (sampled < 0) {
-					err = sampled;
-					goto failed;
-				}
-				words[j] = (u8)((u16)sampled >> 8);
-				words[j + 1] = (u8)sampled;
-			}
-			if (copy_to_user(buf + read, words, chunk)) {
-				err = -EFAULT;
-				goto failed;
-			}
-			read += chunk;
-			count -= chunk;
-			addr += chunk;
-			*ppos += chunk;
-		}
-		select_slot(slot->bus, NULL);
-		return read;
-	}
-#endif
 
 	while (count > 0) {
-		if (!(read & 0x3ff))
+		if (!((read + fill) & 0x3ff))
 			retrode3_cart_led_activity(slot);
-#ifndef CONFIG_RETRODE3_BUFFER
-		unsigned long remaining;
-#endif
 
 		if (mode == MD_ROM && slot->bus_width == 16 && count >= 2 && ((addr & 1) == 0)) {
-			uint16_t word;
 
 			err = _set_address(mode, slot, addr);	// 24 bit address and A0 determines lower/upper byte
 			if(err < 0)
@@ -371,29 +319,10 @@ static ssize_t retrode3_read(struct file *file, char __user *buf,
 			if(err < 0)
 				goto failed;
 
-#ifndef CONFIG_RETRODE3_BUFFER
-			sz = 2;	// handle word reads
-			word = swab16(err);	// use htons()?
-
-			remaining = copy_to_user(buf, (char *) &word, sz);
-#else
-
-			word = err;
-
-			if (fill == sizeof(buffer)) { // flush buffer
-				remaining = copy_to_user(buf+read, buffer, fill);
-				if (remaining)
-		// FIXME: err = something?
-					goto failed;
-				fill = 0;
-			}
-			*((uint16_t *) &buffer[fill]) = swab16(word);	// use htons()?
-			fill += 2;
-			*ppos += 2;
+			buffer[fill++] = (u8)((u16)err >> 8);
+			buffer[fill++] = (u8)err;
 			addr += 2;
 			count -= 2;
-			read += 2;
-#endif
 		} else {
 			uint8_t byte;
 
@@ -488,7 +417,6 @@ static ssize_t retrode3_read(struct file *file, char __user *buf,
 						if(err < 0)
 							goto failed;
 						byte = err = read_half(slot->bus, 1);	// D0..D7
-if ((addr &0xff) == 0) dev_info(&slot->dev, "%s: read SIMPLE %08x %02x\n", __func__, addr, byte);
 						break;
 					case NES_PRG:
 /*
@@ -513,7 +441,6 @@ static unsigned char read_prg_byte(unsigned int address) {
 						set_romsel(addr);
 						_delay_us(1);
 						byte = err = PINK_PRG;	// NES CPU bus = D0..D7
-if ((addr &0xff) == 0) dev_info(&slot->dev, "%s: read NES CPU/PRG/SRAM %08x %02x\n", __func__, addr, byte);
 						break;
 					case NES_CHR:		// OSCR does not clock PHI2...
 					case NES_CHR_M2:
@@ -537,9 +464,8 @@ static unsigned char read_chr_byte(unsigned int address) {
 						set_address(addr);
 						CHR_READ_LOW;
 						_delay_us(1);
-						byte = PINK_CHR;	// NES PPU bus = D8..D15
+						byte = err = PINK_CHR;	// NES PPU bus = D8..D15
 						CHR_READ_HI;
-if ((addr &0xff) == 0) dev_info(&slot->dev, "%s: read NES PPU/CHR %08x %02x\n", __func__, addr, byte);
 						break;
 					case NES_MMC5_SRAM:
 					case NES_REG:		// hier evtl. A15 = 1?
@@ -553,47 +479,27 @@ if ((addr &0xff) == 0) dev_info(&slot->dev, "%s: read NES PPU/CHR %08x %02x\n", 
 			if(err < 0)
 				goto failed;
 
-#ifndef CONFIG_RETRODE3_BUFFER
-			sz = 1;	// handle byte read
-
-			remaining = copy_to_user(buf, (char *) &byte, sz);
-#else
-
-			if (fill == sizeof(buffer)) { // flush buffer
-				remaining = copy_to_user(buf+read, buffer, fill);
-				if (remaining)
-					goto failed;
-				fill = 0;
-			}
-			*((uint8_t *) &buffer[fill]) = byte;
-			fill += 1;
-			*ppos += 1;
-			addr += 1;
-			count -= 1;
-			read += 1;
-#endif
+			buffer[fill++] = byte;
+			addr++;
+			count--;
 		}
 
-#ifndef CONFIG_RETRODE3_BUFFER
-                if (remaining)
-                        goto failed;
+		/* Leave room for a word on the next iteration. Advance the file
+		 * offset only for bytes successfully copied to userspace.
+		 */
+		if (fill >= sizeof(buffer) - 1 || !count) {
+			size_t remaining = copy_to_user(buf + read, buffer, fill);
+			size_t copied = fill - remaining;
 
-		*ppos += sz;
-		addr += sz;
-		buf += sz;
-		count -= sz;
-		read += sz;
-#endif
+			read += copied;
+			*ppos += copied;
+			fill = 0;
+			if (remaining) {
+				err = -EFAULT;
+				goto failed;
+			}
+		}
 	}
-
-#ifdef CONFIG_RETRODE3_BUFFER
-#warning buffered
-	if (fill > 0) { // flush remaining bytes
-		remaining = copy_to_user(buf, buffer, fill);
-		if (remaining)
-			goto failed;
-	}
-#endif
 
 	if (bridge_md_ce) {
 		int restore;
@@ -624,7 +530,7 @@ failed:
 	}
 	select_slot(slot->bus, NULL);
 
-	return err;
+	return read ? read : err;
 }
 
 /*
