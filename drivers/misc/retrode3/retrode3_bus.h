@@ -31,6 +31,8 @@
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 
+struct regmap;
+
 #include "retrode3_slot.h"
 #include "../../gpio/gpiolib.h"		// for direct access to desc->gdev->chip and gpio_chip_hwgpio()
 
@@ -41,6 +43,8 @@
 struct retrode3_bus {
 	struct gpio_descs *addrs;	// addr-gpios
 	struct gpio_descs *datas;	// data-gpios
+	/* X1600 GPIOA PA8..PA23 input-bank snapshot; NULL = per-bit fallback. */
+	struct regmap *rom_read_bank_map;
 	struct gpio_descs *we;		// we-gpios
 	struct gpio_desc *oe;		// oe-gpio
 	struct gpio_desc *time;		// time-gpio
