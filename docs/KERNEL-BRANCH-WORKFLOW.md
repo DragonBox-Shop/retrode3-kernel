@@ -1,117 +1,100 @@
-# Kernel branches, upstream tracking and Retrode3 hardware integration
+# Retrode3 kernel: Letux base, our hardware integration
 
-Stand: 2026-11-22. Build and boot documentation:
-[RETRODE3-KERNEL-SOURCE.md](RETRODE3-KERNEL-SOURCE.md).
+Ownership policy updated 2026-11-24. Historical build and hardware
+provenance remains in [RETRODE3-KERNEL-SOURCE.md](RETRODE3-KERNEL-SOURCE.md).
+
+## One repository, one reviewed patch layer
+
+`DragonBox-Shop/retrode3-kernel` is the full Linux source tree for the
+Retrode3. It is **not** a second copy of the native OSCR source, and
+the kernel module, board DTS/DTSI and kernel configuration should stay
+in the same repository as the matching kernel version.
+
+- Generic Linux base: `goldelico/letux-kernel`, tracked by its
+  `letux-current` moving branch for notifications.
+- Pinned starting base of the currently boot-tested 7.3 series:
+  upstream `letux-7.3-rc5`, commit
+  `f71a8243f157cac91094bc0f7106b7f51cfe5fd1`.
+- Retrode3 changes: `drivers/misc/retrode3/`, the Kconfig/Makefile
+  integration, `lx16+retrode3.dtsi`, `lx16-retrode-*.dts`, other
+  necessary board-level DTB Makefile entries, and the approved
+  Retrode3 kernel config. Keep changes to generic Letux files minimal.
+- `CONFIG_MODVERSIONS`, full `.config`, `Module.symvers`, toolchain,
+  module vermagic and kernel release must match for live module tests.
+
+Do **not** split the cartridge driver or DTSI into a new Git tree.
+Such a split would create more version coupling and make reproducible
+kernel/DTB/.ko builds needlessly complicated.
 
 ## Branch roles
 
-| Branch | Ownership / purpose | Automatic changes |
+| Branch | Purpose | Automatic updates |
 | --- | --- | --- |
-| `project-retrode3-v2` | Letux Retrode3 project source branch in this repository; **keep intact** | Only the CI monitoring files installed on the current default branch |
-| `upstream/letux-retrode3` | Read-only-by-policy mirror of the complete `project-retrode3-v2` history | Daily GitHub Actions update; **no merge** |
-| `upstream/letux-current` | Mirror of `goldelico/letux-kernel:letux-current` | Existing daily GitHub Actions update; **no merge** |
-| `develop` | Retrode3 integration, driver and DTS/DTSI work for current kernel generation | Changes reviewed or intentionally authored; no automatic upstream imports |
-| `master` | Hardware-tested kernel source baseline used for releases | Updated only after hardware validation, not by mirror automation |
-| `feature/*`, `fix/*`, `integration/*` | Short-lived experimental changes, PRs target `develop` | No |
-| `archive/*` | Preserved former major-version branches or histories | No |
+| `upstream/letux-current` | Mirror of generic Nikolaus Linux | Nightly only |
+| `develop` | Reviewed Retrode3 driver, DTS and config development | Never |
+| `master` | Hardware-tested release source, immutable until approval | Never |
+| `integration/*` | Temporary kernel-version upgrades/rebases for testing | Never |
+| `feature/*` | Small isolated changes and their tests | Never |
+| `archive/*` | Read-only preserved historical tips if needed | Never |
 
-Old master (7.2) and old develop (7.1) must be preserved in
-archive branches before source-history migrations. Never delete a branch
-that still contains unmerged work. GitHub's default branch should be
-`master` after the 7.3 migration, rather than Letux' project
-branch. **Scheduled GitHub Actions execute from the default branch**;
-ensure both mirror workflows are present there before changing it.
+`upstream/letux-current` is a moving **reference**, not the input for
+an uncontrolled build or automatic merge into `develop` or `master`.
+Each image manifest must pin the exact selected Git commit SHA.
+Do not rewrite published release history.
 
-## Where the Retrode3 files come from
+## Nightly synchronization
 
-The general Letux kernel branch is *not* a complete Retrode3 hardware
-source. Retrode3-specific source is maintained separately in the
-`project-retrode3-v2` branch, including:
+Only `.github/workflows/sync-letux-upstream.yml` should remain active.
+It fetches the public `goldelico/letux-kernel:letux-current`, advances
+only `upstream/letux-current`, and creates a review issue when the
+upstream SHA changes. It never compiles upstream code or merges patches.
+Schedule: 03:23 UTC daily, with a manual `workflow_dispatch` option.
+Scheduled workflows run from GitHub's **default branch**, currently
+`master`. Until the new workflow is merged into `master`, the workflow
+policy in this feature PR is *not* the active nightly configuration.
 
-- `drivers/misc/retrode3/` (driver, headers, Kconfig and Makefile)
-- `arch/mips/boot/dts/ingenic/lx16+retrode3.dtsi`
-- `arch/mips/boot/dts/ingenic/lx16-retrode-*.dts`
-- Board-level LX16 includes and relevant DTB Makefile entries
-- Relevant general misc Kconfig/Makefile and Letux MIPS defconfigs
+The former `.github/workflows/sync-retrode3-upstream.yml` mirrored
+the in-repository `project-retrode3-v2` branch. This is no longer
+needed: ownership of the cartridge driver and board files has moved
+to us. Retire that workflow, but preserve its history and do not
+automatically delete its source or mirror branch.
 
-The original Retrode3 2.9.5 DTB was reproduced **byte-for-byte** from
-the integration tree; see the boot/build evidence document above.
+## Kernel upgrade procedure
 
-## GitHub Actions (no automatic code merges)
+1. Review the mirror's reported upstream commit and select an exact
+   Letux kernel release/tag or explicitly approved commit as base.
+   A newer moving `letux-current` snapshot is **not** by itself
+   a release decision.
+2. Branch from `develop` as `integration/letux-VERSION`. Check the
+   common ancestry and merge the **selected pinned upstream commit**
+   (with a regular merge commit) into the integration branch.
+   Avoid rebasing shared `master` and `develop` history.
+3. Resolve conflicts in our driver, board DTS/DTSI and configuration.
+   Keep each Retrode3-specific change reviewable and document any
+   unavoidable modifications to generic Letux code.
+4. Compile the complete kernel, DTB and modules using the pinned
+   MIPS32EL toolchain and config. Verify `CONFIG_MODVERSIONS`,
+   `modules.dep`, kernel release, module symbol CRCs and `modinfo`.
+   For isolated driver-only development, build just the
+   `M=drivers/misc/retrode3` module against prepared symbols.
+5. Test a **separate SD** on the real Retrode3: boot, slots, LED
+   triggers, USB, Wi-Fi (where firmware allows), and cartridge reads.
+   Keep the installed kernel/module untouched until backed up.
+6. Merge the reviewed integration branch into `develop`. Promote
+   `develop` to `master` only after explicit hardware acceptance.
+   The image/package release is a separate decision.
 
-- `.github/workflows/sync-letux-upstream.yml`: mirrors
-  `goldelico/letux-kernel:letux-current` into
-  `upstream/letux-current`.
-- `.github/workflows/sync-retrode3-upstream.yml`: mirrors
-  `project-retrode3-v2` into `upstream/letux-retrode3`. It
-  compares each new snapshot with the old mirror, checks only the
-  Retrode3 source/integration paths listed above and creates a
-  **review issue** when those paths change. It includes the changed
-  files, a commit comparison, and best-effort `git cherry` patch-ID
-  equivalence hints against `develop`. The first mirror sync creates
-  a baseline without reporting historical changes.
+## Historical branches, safe cleanup
 
-A mirror branch can be force-updated to accurately follow its source,
-but the workflows do **not** push to `develop`, `master`, or
-`project-retrode3-v2`. If Letux rewrites history or if a shallow
-history prevents meaningful `git cherry` results, perform a manual
-review. A `-` from `git cherry` is only evidence that an
-equivalent patch exists; it is **not** a proof that all behavior,
-context and kernel ABI are equivalent. Squash or modified patches can
-be misidentified, especially across kernel series.
+Do not delete old branches just because a similarly named mirror
+exists. The current legacy candidates are `project-retrode3-v2`,
+`project-retrode3-v5`, `project-retrode3`,
+`project-retrode3-2.9.4`, `upstream/letux-retrode3` and
+`letux-current`. Before removal inspect open PRs, unique commits,
+and hardware provenance; preserve useful tips under `archive/*`
+or through annotated tags. Repository history is not removed by
+deleting a branch ref, but unreferenced commits may eventually
+become unreachable. Avoid deleting any legacy refs in this cleanup PR.
 
-The workflows require GitHub Actions with repository-scoped write
-permissions for contents and review issues. A committed workflow is
-not evidence that a scheduled run has completed: check Actions runs
-for successful execution.
-
-## How an upstream change reaches our kernel
-
-1. Mirror the relevant source branch; do not overwrite current code.
-2. Review the new source commits and file-scoped diff, then compare
-   patch content against `develop`:
-   ```sh
-   git fetch origin develop upstream/letux-retrode3 upstream/letux-current
-   git cherry origin/upstream/letux-retrode3 origin/develop
-   git log --cherry-pick --right-only --oneline \
-     origin/develop...origin/upstream/letux-retrode3
-   ```
-3. If the patch was already incorporated, document that fact and
-   avoid importing it again. Where necessary, use `git range-diff`
-   and inspect the full diff, especially if Letux used squash,
-   rebase or adapted changes.
-4. Select only wanted changes, preferably as small, reviewable PRs to
-   `develop`. Do not merge the entire moving project or Letux
-   history into `develop` merely because it changed.
-5. Rebuild with the pinned GCC/toolchain, config and
-   `LOCALVERSION=+`; validate on a removable SD card. Keep the
-   tested `retrode3.ko` separate from the installed module until
-   explicit hardware validation.
-6. Promote the verified source from `develop` to `master` after
-   checking regressions, source provenance, module ABI and artifact
-   identity. Release image and package publication are **separate**
-   gates.
-
-When submitting our changes to Letux, send narrowly scoped
-driver/DTS commits. If possible preserve individual commits rather
-than squashing unrelated patches. After upstream acceptance,
-`git cherry` can help detect equivalent changes regardless of
-commit SHA, but neither Git nor this workflow automatically declares
-an accepted upstream patch safe to import.
-
-## Known 7.3 integration evidence and follow-ups
-
-Our independently built 7.3.0-rc5 kernel (Bootlin GCC 8.2.0) was
-physically booted on Retrode3 2.9.5. USB networking, cartridge
-sense on MD/SNES, controller device registration and the Web
-interface's automatic cartridge recognition worked. The tested
-2.9.5 DTB matched the existing DTB by SHA256. Our separately
-built full module set and final SD image have not yet been subjected
-to complete release acceptance.
-
-Open follow-ups: on boot with cartridges already inserted, the
-associated LEDs remain on the heartbeat trigger until a physical
-insert/remove event; ESP-Hosted/WLAN also reports an initialization
-failure. The status LED policy is intended to be redesigned
-separately. Do not claim that LED behavior or Wi-Fi has passed
-release acceptance merely because the kernel boots.
+Retire redundant jobs and document ownership first; delete old
+branch refs in a **separately approved** maintenance change.
