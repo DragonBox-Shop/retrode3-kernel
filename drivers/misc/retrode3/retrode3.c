@@ -50,13 +50,22 @@ module_param_named(sms_mapper_write_test, sms_mapper_write_test, bool, 0644);
 MODULE_PARM_DESC(sms_mapper_write_test,
 	"BENCH ONLY: guarded SMS $FFFC-$FFFF mapper writes at 5V with high-Z");
 
-/* Operator-only GBx-0011 hardware bench. Activate with the MD slot empty,
- * then insert the adapter. No normal MD/SNES/NES reads or writes may run
- * until this module is reloaded without the GBx adapter attached. */
+/* Scoped GBx ROM profile. The common CLI owns the inter-process bus lock.
+ * The kernel also serializes transitions against file operations, controller
+ * polling and raw sysfs IO. No direction change while a GBx FD is open.
+ */
 static bool gbx_md_test;
-module_param_named(gbx_md_test, gbx_md_test, bool, 0644);
+static DEFINE_MUTEX(gbx_profile_lock);
+static struct retrode3_bus *gbx_profile_bus;
+static unsigned int gbx_profile_users;
+static int retrode3_gbx_param_set(const char *val, const struct kernel_param *kp);
+static const struct kernel_param_ops retrode3_gbx_param_ops = {
+	.set = retrode3_gbx_param_set,
+	.get = param_get_bool,
+};
+module_param_cb(gbx_md_test, &retrode3_gbx_param_ops, &gbx_md_test, 0644);
 MODULE_PARM_DESC(gbx_md_test,
-	"BENCH ONLY: GBx-0011 MD bus cycles (modes 23/24/25), no cart writes");
+	"Scoped GBx-0011 ROM-only MD bus profile; restore on disable");
 /*
  * Hardware-guarded ROM-read experiment: one GPIOA PIN snapshot can
  * replace 8 or 16 per-bit GPIO reads on the X1600.
@@ -579,6 +588,44 @@ static unsigned long get_frequency(struct retrode3_bus *bus, int channel)
 #include "retrode3_cart.c"
 #include "retrode3_controller.c"
 
+/* Called with the profile mutex held; no file or raw GPIO operation can
+ * start during the transition. The ordinary select mutex also excludes
+ * an outstanding legacy sysfs-selected slot.
+ */
+static int retrode3_gbx_param_set(const char *val, const struct kernel_param *kp)
+{
+	struct retrode3_bus *bus;
+	bool enable;
+	int err;
+
+	err = kstrtobool(val, &enable);
+	if (err)
+		return err;
+	mutex_lock(&gbx_profile_lock);
+	bus = gbx_profile_bus;
+	if (enable == gbx_md_test && (enable || !bus || !bus->gbx_active))
+		goto done;
+	if (gbx_profile_users) {
+		err = -EBUSY;
+		goto done;
+	}
+	if (bus) {
+		if (!mutex_trylock(&bus->select_lock)) {
+			err = -EBUSY;
+			goto done;
+		}
+		if (!enable && bus->gbx_active)
+			err = retrode3_gbx_restore(bus);
+		mutex_unlock(&bus->select_lock);
+		if (err)
+			goto done;
+	}
+	gbx_md_test = enable;
+done:
+	mutex_unlock(&gbx_profile_lock);
+	return err;
+}
+
 /* Stop workers first: neither GPIOs nor child devices may be released while
  * a cartridge-detect or game-controller poll is still running.
  */
@@ -786,6 +833,9 @@ printk("%s: chip=%px\n", __func__, bus->addrs->desc[0]->gdev->chip);
 
 	select_slot(bus, NULL);
 	platform_set_drvdata(pdev, bus);
+	mutex_lock(&gbx_profile_lock);
+	gbx_profile_bus = bus;
+	mutex_unlock(&gbx_profile_lock);
 
 	/* Start polling only after every slot has been fully registered. */
 	for (i = 0; i < ARRAY_SIZE(bus->slots); i++) {
@@ -813,6 +863,10 @@ static void retrode3_remove(struct platform_device *pdev)
 	struct retrode3_bus *bus = platform_get_drvdata(pdev);
 	int i;
 
+	mutex_lock(&gbx_profile_lock);
+	if (gbx_profile_bus == bus)
+		gbx_profile_bus = NULL;
+	mutex_unlock(&gbx_profile_lock);
 	retrode3_unregister_slots(bus);
 
 	for (i = 0; i < ARRAY_SIZE(bus->clks); i++) {
@@ -865,7 +919,7 @@ static ssize_t vcc_show(struct device *dev, struct device_attribute *attr,
 	return sprintf(buf, "%dmV\n", mV);
 }
 
-static ssize_t vcc_store(struct device *dev,
+static ssize_t vcc_store_raw(struct device *dev,
 			   struct device_attribute *attr,
 			   const char *buf, size_t count)
 {
@@ -886,9 +940,26 @@ static ssize_t vcc_store(struct device *dev,
 
 	return count;
 }
+
+static ssize_t vcc_store(struct device *dev,
+			   struct device_attribute *attr,
+			   const char *buf, size_t count)
+{
+	ssize_t ret;
+
+	if (!mutex_trylock(&gbx_profile_lock))
+		return -EBUSY;
+	if (gbx_profile_users)
+		ret = -EBUSY;
+	else
+		ret = vcc_store_raw(dev, attr, buf, count);
+	mutex_unlock(&gbx_profile_lock);
+	return ret;
+}
+
 static DEVICE_ATTR_RW(vcc);
 
-static ssize_t addr_show(struct device *dev, struct device_attribute *attr,
+static ssize_t addr_show_raw(struct device *dev, struct device_attribute *attr,
 				char *buf)
 {
 	struct retrode3_slot *slot = dev_get_drvdata(dev);
@@ -899,7 +970,23 @@ static ssize_t addr_show(struct device *dev, struct device_attribute *attr,
 	return sprintf(buf, "%08x\n", slot->bus->current_addr);
 }
 
-static ssize_t addr_store(struct device *dev,
+static ssize_t addr_show(struct device *dev, struct device_attribute *attr,
+				char *buf)
+{
+	ssize_t ret;
+
+	if (!mutex_trylock(&gbx_profile_lock))
+		return -EBUSY;
+	if ((gbx_md_test || (gbx_profile_bus && gbx_profile_bus->gbx_active)))
+		ret = -EBUSY;
+	else
+		ret = addr_show_raw(dev, attr, buf);
+	mutex_unlock(&gbx_profile_lock);
+	return ret;
+}
+
+
+static ssize_t addr_store_raw(struct device *dev,
 			   struct device_attribute *attr,
 			   const char *buf, size_t count)
 {
@@ -928,9 +1015,26 @@ static ssize_t addr_store(struct device *dev,
 
 	return count;
 }
+
+static ssize_t addr_store(struct device *dev,
+			   struct device_attribute *attr,
+			   const char *buf, size_t count)
+{
+	ssize_t ret;
+
+	if (!mutex_trylock(&gbx_profile_lock))
+		return -EBUSY;
+	if ((gbx_md_test || (gbx_profile_bus && gbx_profile_bus->gbx_active)))
+		ret = -EBUSY;
+	else
+		ret = addr_store_raw(dev, attr, buf, count);
+	mutex_unlock(&gbx_profile_lock);
+	return ret;
+}
+
 static DEVICE_ATTR_RW(addr);
 
-static ssize_t data8_show(struct device *dev, struct device_attribute *attr,
+static ssize_t data8_show_raw(struct device *dev, struct device_attribute *attr,
 				char *buf)
 {
 	struct retrode3_slot *slot = dev_get_drvdata(dev);
@@ -947,7 +1051,23 @@ static ssize_t data8_show(struct device *dev, struct device_attribute *attr,
 	return sprintf(buf, "%02x\n", byte);
 }
 
-static ssize_t data8_store(struct device *dev,
+static ssize_t data8_show(struct device *dev, struct device_attribute *attr,
+				char *buf)
+{
+	ssize_t ret;
+
+	if (!mutex_trylock(&gbx_profile_lock))
+		return -EBUSY;
+	if ((gbx_md_test || (gbx_profile_bus && gbx_profile_bus->gbx_active)))
+		ret = -EBUSY;
+	else
+		ret = data8_show_raw(dev, attr, buf);
+	mutex_unlock(&gbx_profile_lock);
+	return ret;
+}
+
+
+static ssize_t data8_store_raw(struct device *dev,
 			   struct device_attribute *attr,
 			   const char *buf, size_t count)
 {
@@ -970,9 +1090,26 @@ static ssize_t data8_store(struct device *dev,
 
 	return count;
 }
+
+static ssize_t data8_store(struct device *dev,
+			   struct device_attribute *attr,
+			   const char *buf, size_t count)
+{
+	ssize_t ret;
+
+	if (!mutex_trylock(&gbx_profile_lock))
+		return -EBUSY;
+	if ((gbx_md_test || (gbx_profile_bus && gbx_profile_bus->gbx_active)))
+		ret = -EBUSY;
+	else
+		ret = data8_store_raw(dev, attr, buf, count);
+	mutex_unlock(&gbx_profile_lock);
+	return ret;
+}
+
 static DEVICE_ATTR_RW(data8);
 
-static ssize_t data16_show(struct device *dev, struct device_attribute *attr,
+static ssize_t data16_show_raw(struct device *dev, struct device_attribute *attr,
 				char *buf)
 {
 	struct retrode3_slot *slot = dev_get_drvdata(dev);
@@ -989,7 +1126,23 @@ static ssize_t data16_show(struct device *dev, struct device_attribute *attr,
 	return sprintf(buf, "%04x\n", word);
 }
 
-static ssize_t data16_store(struct device *dev,
+static ssize_t data16_show(struct device *dev, struct device_attribute *attr,
+				char *buf)
+{
+	ssize_t ret;
+
+	if (!mutex_trylock(&gbx_profile_lock))
+		return -EBUSY;
+	if ((gbx_md_test || (gbx_profile_bus && gbx_profile_bus->gbx_active)))
+		ret = -EBUSY;
+	else
+		ret = data16_show_raw(dev, attr, buf);
+	mutex_unlock(&gbx_profile_lock);
+	return ret;
+}
+
+
+static ssize_t data16_store_raw(struct device *dev,
 			   struct device_attribute *attr,
 			   const char *buf, size_t count)
 {
@@ -1012,9 +1165,26 @@ static ssize_t data16_store(struct device *dev,
 
 	return count;
 }
+
+static ssize_t data16_store(struct device *dev,
+			   struct device_attribute *attr,
+			   const char *buf, size_t count)
+{
+	ssize_t ret;
+
+	if (!mutex_trylock(&gbx_profile_lock))
+		return -EBUSY;
+	if ((gbx_md_test || (gbx_profile_bus && gbx_profile_bus->gbx_active)))
+		ret = -EBUSY;
+	else
+		ret = data16_store_raw(dev, attr, buf, count);
+	mutex_unlock(&gbx_profile_lock);
+	return ret;
+}
+
 static DEVICE_ATTR_RW(data16);
 
-static ssize_t raw16_show(struct device *dev, struct device_attribute *attr,
+static ssize_t raw16_show_raw(struct device *dev, struct device_attribute *attr,
 				char *buf)
 {
 	struct retrode3_slot *slot = dev_get_drvdata(dev);
@@ -1028,7 +1198,23 @@ static ssize_t raw16_show(struct device *dev, struct device_attribute *attr,
 	return sprintf(buf, "%04x\n", word);
 }
 
-static ssize_t raw16_store(struct device *dev,
+static ssize_t raw16_show(struct device *dev, struct device_attribute *attr,
+				char *buf)
+{
+	ssize_t ret;
+
+	if (!mutex_trylock(&gbx_profile_lock))
+		return -EBUSY;
+	if ((gbx_md_test || (gbx_profile_bus && gbx_profile_bus->gbx_active)))
+		ret = -EBUSY;
+	else
+		ret = raw16_show_raw(dev, attr, buf);
+	mutex_unlock(&gbx_profile_lock);
+	return ret;
+}
+
+
+static ssize_t raw16_store_raw(struct device *dev,
 			   struct device_attribute *attr,
 			   const char *buf, size_t count)
 {
@@ -1048,9 +1234,26 @@ static ssize_t raw16_store(struct device *dev,
 
 	return count;
 }
+
+static ssize_t raw16_store(struct device *dev,
+			   struct device_attribute *attr,
+			   const char *buf, size_t count)
+{
+	ssize_t ret;
+
+	if (!mutex_trylock(&gbx_profile_lock))
+		return -EBUSY;
+	if ((gbx_md_test || (gbx_profile_bus && gbx_profile_bus->gbx_active)))
+		ret = -EBUSY;
+	else
+		ret = raw16_store_raw(dev, attr, buf, count);
+	mutex_unlock(&gbx_profile_lock);
+	return ret;
+}
+
 static DEVICE_ATTR_RW(raw16);
 
-static ssize_t control_show(struct device *dev, struct device_attribute *attr,
+static ssize_t control_show_raw(struct device *dev, struct device_attribute *attr,
 				char *buf)
 {
 	struct retrode3_slot *slot = dev_get_drvdata(dev);
@@ -1069,7 +1272,23 @@ static ssize_t control_show(struct device *dev, struct device_attribute *attr,
 	return strlen(buf);
 }
 
-static ssize_t control_store(struct device *dev,
+static ssize_t control_show(struct device *dev, struct device_attribute *attr,
+				char *buf)
+{
+	ssize_t ret;
+
+	if (!mutex_trylock(&gbx_profile_lock))
+		return -EBUSY;
+	if ((gbx_md_test || (gbx_profile_bus && gbx_profile_bus->gbx_active)))
+		ret = -EBUSY;
+	else
+		ret = control_show_raw(dev, attr, buf);
+	mutex_unlock(&gbx_profile_lock);
+	return ret;
+}
+
+
+static ssize_t control_store_raw(struct device *dev,
 			   struct device_attribute *attr,
 			   const char *buf, size_t count)
 {
@@ -1103,6 +1322,23 @@ static ssize_t control_store(struct device *dev,
 //TEST(test);
 	return -EINVAL;
 }
+
+static ssize_t control_store(struct device *dev,
+			   struct device_attribute *attr,
+			   const char *buf, size_t count)
+{
+	ssize_t ret;
+
+	if (!mutex_trylock(&gbx_profile_lock))
+		return -EBUSY;
+	if ((gbx_md_test || (gbx_profile_bus && gbx_profile_bus->gbx_active)))
+		ret = -EBUSY;
+	else
+		ret = control_store_raw(dev, attr, buf, count);
+	mutex_unlock(&gbx_profile_lock);
+	return ret;
+}
+
 static DEVICE_ATTR_RW(control);
 
 static int get_channel_index(struct device_attribute *attr)
@@ -1110,7 +1346,7 @@ static int get_channel_index(struct device_attribute *attr)
 	return attr->attr.name[strlen(attr->attr.name) - 1] - '0';
 }
 
-static ssize_t clk_frequency_show(struct device *dev, struct device_attribute *attr, char *buf)
+static ssize_t clk_frequency_show_raw(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct retrode3_slot *slot = dev_get_drvdata(dev);
 	int ch = get_channel_index(attr);
@@ -1118,7 +1354,22 @@ static ssize_t clk_frequency_show(struct device *dev, struct device_attribute *a
 	return sysfs_emit(buf, "%lu\n", get_frequency(slot->bus, ch));
 }
 
-static ssize_t clk_frequency_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+static ssize_t clk_frequency_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	ssize_t ret;
+
+	if (!mutex_trylock(&gbx_profile_lock))
+		return -EBUSY;
+	if ((gbx_md_test || (gbx_profile_bus && gbx_profile_bus->gbx_active)))
+		ret = -EBUSY;
+	else
+		ret = clk_frequency_show_raw(dev, attr, buf);
+	mutex_unlock(&gbx_profile_lock);
+	return ret;
+}
+
+
+static ssize_t clk_frequency_store_raw(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
 {
 	struct retrode3_slot *slot = dev_get_drvdata(dev);
 	int ch = get_channel_index(attr);
@@ -1135,6 +1386,21 @@ static ssize_t clk_frequency_store(struct device *dev, struct device_attribute *
 
 	return count;
 }
+
+static ssize_t clk_frequency_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+	ssize_t ret;
+
+	if (!mutex_trylock(&gbx_profile_lock))
+		return -EBUSY;
+	if ((gbx_md_test || (gbx_profile_bus && gbx_profile_bus->gbx_active)))
+		ret = -EBUSY;
+	else
+		ret = clk_frequency_store_raw(dev, attr, buf, count);
+	mutex_unlock(&gbx_profile_lock);
+	return ret;
+}
+
 
 static DEVICE_ATTR(clock0, 0644, clk_frequency_show, clk_frequency_store);
 static DEVICE_ATTR(clock1, 0644, clk_frequency_show, clk_frequency_store);
