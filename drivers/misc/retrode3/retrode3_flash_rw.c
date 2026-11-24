@@ -16,18 +16,22 @@
 #define R3_FLASH_LARGE_SECTOR   65536U
 
 /*
- * Explicitly opt-in x1600 GPIOA PA8..PA23 bulk direction experiment.
+ * X1600 GPIOA PA8..PA23 bulk direction/data path is the DEFAULT for
+ * compatible Retrode3 hardware, after repeated successful Flash Write
+ * and full Verify tests. A strict GPIO topology check below falls back
+ * to the original per-pin GPIO implementation on other hardware.
  *
- * The normal gpiod method remains the DEFAULT, hardware-proven path.
  * X1600 pinctrl-ingenic uses a shared regmap; the *same* regmap is
  * returned via the GPIO chip parent driver's data. These register
  * offsets are intentionally limited to the confirmed X1600 layout.
  * Do not try to use these offsets on an unknown SoC/GPIO controller.
+ * The root-only parameter permits disabling the optimized path for
+ * debugging or regression comparisons without rebuilding the module.
  */
-static bool r3_flash_bulk_gpio;
+static bool r3_flash_bulk_gpio = true;
 module_param_named(flash_bulk_gpio, r3_flash_bulk_gpio, bool, 0600);
 MODULE_PARM_DESC(flash_bulk_gpio,
-                 "Experimental X1600 PA8..PA23 Flash GPIO bulk write (default off)");
+                 "X1600 PA8..PA23 Flash bulk GPIO (default on with topology check; 0=per-pin fallback)");
 
 #define R3_X1600_PA_DATA_MASK   GENMASK(23, 8)
 #define R3_X1600_PAT0_SET       0x44
