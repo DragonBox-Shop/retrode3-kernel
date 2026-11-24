@@ -1,4 +1,4 @@
-name: Mirror Letux upstream kernel
+name: Mirror Letux Linux kernel and report changes
 
 on:
   schedule:
@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  issues: write
 
 concurrency:
   group: mirror-letux-upstream
@@ -16,19 +17,83 @@ jobs:
   mirror:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out Retrode3 repository
+      - name: Check out the trusted Retrode3 workflow
         uses: actions/checkout@v4
         with:
           persist-credentials: true
           fetch-depth: 1
 
-      - name: Fetch Letux upstream without executing upstream code
+      - name: Fetch general Letux kernel and update isolated reference
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
-          git fetch --no-tags https://github.com/goldelico/letux-kernel.git \
-            +refs/heads/letux-current:refs/remotes/letux/letux-current
-          git rev-parse refs/remotes/letux/letux-current
+          set -euo pipefail
+          upstream=https://github.com/goldelico/letux-kernel.git
+          source_ref=refs/remotes/letux/letux-current
+          mirror_ref=refs/heads/upstream/letux-current
 
-      - name: Update only the dedicated upstream mirror
-        run: |
-          git push origin \
-            +refs/remotes/letux/letux-current:refs/heads/upstream/letux-current
+          # Fetch objects only; never execute upstream scripts.
+          git fetch --no-tags --filter=blob:none --depth=256 "$upstream" \
+            "+refs/heads/letux-current:$source_ref"
+          current=$(git rev-parse "$source_ref")
+          previous=
+          if git ls-remote --exit-code --heads origin "$mirror_ref" >/dev/null 2>&1; then
+            git fetch --no-tags --filter=blob:none --depth=256 origin \
+              "+$mirror_ref:refs/remotes/mirror/letux-current"
+            previous=$(git rev-parse refs/remotes/mirror/letux-current)
+          fi
+
+          if [ "$current" = "$previous" ]; then
+            printf 'Letux kernel unchanged: %s\n' "$current" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          if [ -n "$previous" ]; then
+            report="$RUNNER_TEMP/letux-kernel-review.md"
+            {
+              echo '# Letux Linux: new upstream revision'
+              echo
+              echo 'Source: goldelico/letux-kernel, branch letux-current'
+              printf 'Previous mirror: %s\nCurrent upstream: %s\n' \
+                "$previous" "$current"
+              echo
+              echo "Compare: https://github.com/$GITHUB_REPOSITORY/compare/$previous...$current"
+              echo
+              echo '## Change overview (first 100 commits)'
+              echo '~~~text'
+              git log --no-merges -n 100 --format='%h %s' \
+                "$previous..$current" || true
+              echo '~~~'
+              echo
+              if git merge-base --is-ancestor "$previous" "$current"; then
+                echo 'Fast-forward detected. Do not merge automatically.'
+              else
+                echo '**Attention:** non-fast-forward or shallow Git history.'
+                echo 'Check the complete source comparison manually.'
+              fi
+              echo
+              echo 'Only import into a dedicated kernel-integration branch.'
+              echo 'Preserve our drivers/misc/retrode3 sources, DTS/DTSI and'
+              echo 'Retrode3 kernel configuration. Verify kernel ABI, device'
+              echo 'tree and module on a separate SD before release.'
+            } > "$report"
+            cat "$report" >> "$GITHUB_STEP_SUMMARY"
+            gh issue create --repo "$GITHUB_REPOSITORY" \
+              --title "Review Letux Linux: ${previous:0:12} -> ${current:0:12}" \
+              --body-file "$report"
+          else
+            echo 'Initial Letux kernel mirror: no retrospective issue.' \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # Upstream rewrites are mirrored only here; race-safe lease.
+          # Never update develop/master automatically.
+          if [ -n "$previous" ]; then
+            git push --force-with-lease="$mirror_ref:$previous" origin \
+              "+$source_ref:$mirror_ref"
+          else
+            git push --force-with-lease="$mirror_ref:" origin \
+              "+$source_ref:$mirror_ref"
+          fi
+          echo "Mirror updated: $mirror_ref -> $current" >> "$GITHUB_STEP_SUMMARY"

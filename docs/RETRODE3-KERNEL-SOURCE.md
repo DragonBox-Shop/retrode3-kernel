@@ -1,5 +1,14 @@
 # Retrode3 kernel sources and release policy
 
+> **Pflegehinweis (24.11.2026):** Retrode3-Kernelmodul, DTS/DTSI und
+> Kernelkonfiguration werden ab jetzt ausschließlich in diesem
+> Repository gepflegt. Die frühere Beobachtung des Letux-
+> `project-retrode3-v2`-Branches wird eingestellt. Der allgemeine
+> Letux-Kernel bleibt als unveränderter Upstream-Referenzstand erhalten.
+> Siehe [KERNEL-BRANCH-WORKFLOW.md](KERNEL-BRANCH-WORKFLOW.md).
+> Die folgenden Abschnitte dokumentieren auch ältere Teststände und
+> sind keine aktuellen Release-Freigaben.
+
 ## Purpose and provenance
 
 This tree tracks the Retrode3-specific kernel, not the generic upstream
