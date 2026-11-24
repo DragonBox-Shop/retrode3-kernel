@@ -30,27 +30,41 @@ jobs:
         run: |
           set -euo pipefail
           upstream=https://github.com/goldelico/letux-kernel.git
+          upstream_branch=refs/heads/letux-current
           source_ref=refs/remotes/letux/letux-current
           mirror_ref=refs/heads/upstream/letux-current
 
-          # Fetch objects only; never execute upstream scripts.
-          git fetch --no-tags --filter=blob:none --depth=256 "$upstream" \
-            "+refs/heads/letux-current:$source_ref"
-          current=$(git rev-parse "$source_ref")
-          previous=
-          if git ls-remote --exit-code --heads origin "$mirror_ref" >/dev/null 2>&1; then
-            git fetch --no-tags --filter=blob:none --depth=256 origin \
-              "+$mirror_ref:refs/remotes/mirror/letux-current"
-            previous=$(git rev-parse refs/remotes/mirror/letux-current)
-          fi
+          # First check the tip without downloading a huge kernel history
+          # when Nikolaus has not published anything new.
+          current_line=$(git ls-remote --exit-code "$upstream" "$upstream_branch")
+          current=$(printf '%s\n' "$current_line" | cut -f1)
+          [[ "$current" =~ ^[0-9a-f]{40}$ ]] || exit 1
 
+          previous=
+          if previous_line=$(git ls-remote --exit-code --heads origin "$mirror_ref"); then
+            previous=$(printf '%s\n' "$previous_line" | cut -f1)
+            [[ "$previous" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          fi
           if [ "$current" = "$previous" ]; then
-            printf 'Letux kernel unchanged: %s\n' "$current" >> "$GITHUB_STEP_SUMMARY"
+            echo "Letux kernel unchanged: $current" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
+          # Do not use --filter=blob:none or a shallow --depth=N here!
+          # A blobless/shallow tip can be inspected, but pushing it to
+          # another, independent GitHub repository needs the missing
+          # objects. On this repo, it previously failed with:
+          # upload-pack: not our ref / remote unpack: missing object.
+          # Unlike the original code, this fetch is complete.
+          git fetch --no-tags "$upstream" "+$upstream_branch:$source_ref"
+          fetched=$(git rev-parse "$source_ref")
+          if [ "$fetched" != "$current" ]; then
+            echo "Letux branch changed during fetch; retry in a fresh run" >&2
+            exit 1
+          fi
+
+          report="$RUNNER_TEMP/letux-kernel-review.md"
           if [ -n "$previous" ]; then
-            report="$RUNNER_TEMP/letux-kernel-review.md"
             {
               echo '# Letux Linux: new upstream revision'
               echo
@@ -60,40 +74,57 @@ jobs:
               echo
               echo "Compare: https://github.com/$GITHUB_REPOSITORY/compare/$previous...$current"
               echo
-              echo '## Change overview (first 100 commits)'
+              echo '## Changes (first 100 commits)'
               echo '~~~text'
-              git log --no-merges -n 100 --format='%h %s' \
-                "$previous..$current" || true
+              if git cat-file -e "$previous^{commit}" 2>/dev/null; then
+                git log --no-merges -n 100 --format='%h %s' \
+                  "$previous..$current"
+              else
+                echo 'Previous tip is not in upstream history; review the complete diff.'
+                git log --no-merges -n 30 --format='%h %s' "$current"
+              fi
               echo '~~~'
               echo
-              if git merge-base --is-ancestor "$previous" "$current"; then
-                echo 'Fast-forward detected. Do not merge automatically.'
+              if git cat-file -e "$previous^{commit}" 2>/dev/null &&
+                 git merge-base --is-ancestor "$previous" "$current"; then
+                echo 'Fast-forward detected. Review before integration.'
               else
-                echo '**Attention:** non-fast-forward or shallow Git history.'
-                echo 'Check the complete source comparison manually.'
+                echo '**Attention:** upstream history may have diverged or been rewritten.'
+                echo 'Review the selected kernel base before any merge.'
               fi
               echo
-              echo 'Only import into a dedicated kernel-integration branch.'
-              echo 'Preserve our drivers/misc/retrode3 sources, DTS/DTSI and'
-              echo 'Retrode3 kernel configuration. Verify kernel ABI, device'
-              echo 'tree and module on a separate SD before release.'
+              echo 'Never merge this mirror into develop/master automatically.'
+              echo 'Preserve our Retrode3 driver, DTS/DTSI and kernel config.'
+              echo 'Build and hardware-test each kernel update separately.'
             } > "$report"
+          fi
+
+          # Push before reporting success. A failed push must not create
+          # another duplicate review issue on every nightly retry.
+          # --no-thin avoids relying on missing receiver objects.
+          if [ -n "$previous" ]; then
+            git push --no-thin --force-with-lease="$mirror_ref:$previous" origin \
+              "+$source_ref:$mirror_ref"
+          else
+            git push --no-thin --force-with-lease="$mirror_ref:" origin \
+              "+$source_ref:$mirror_ref"
+          fi
+          echo "Mirror updated: $mirror_ref -> $current" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -n "$previous" ]; then
+            title="Review Letux Linux: ${previous:0:12} -> ${current:0:12}"
+            # A previous failed implementation could have created an issue
+            # before its unsuccessful push. Reuse it rather than duplicating.
+            if gh issue list --repo "$GITHUB_REPOSITORY" --state all \
+               --limit 100 --search "$title" --json title \
+               --jq '.[].title' | grep -Fqx "$title"; then
+              echo "Review issue already exists: $title" >> "$GITHUB_STEP_SUMMARY"
+            else
+              gh issue create --repo "$GITHUB_REPOSITORY" \
+                --title "$title" --body-file "$report"
+            fi
             cat "$report" >> "$GITHUB_STEP_SUMMARY"
-            gh issue create --repo "$GITHUB_REPOSITORY" \
-              --title "Review Letux Linux: ${previous:0:12} -> ${current:0:12}" \
-              --body-file "$report"
           else
             echo 'Initial Letux kernel mirror: no retrospective issue.' \
               >> "$GITHUB_STEP_SUMMARY"
           fi
-
-          # Upstream rewrites are mirrored only here; race-safe lease.
-          # Never update develop/master automatically.
-          if [ -n "$previous" ]; then
-            git push --force-with-lease="$mirror_ref:$previous" origin \
-              "+$source_ref:$mirror_ref"
-          else
-            git push --force-with-lease="$mirror_ref:" origin \
-              "+$source_ref:$mirror_ref"
-          fi
-          echo "Mirror updated: $mirror_ref -> $current" >> "$GITHUB_STEP_SUMMARY"
