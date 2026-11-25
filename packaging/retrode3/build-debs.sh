@@ -39,7 +39,7 @@ printf '%s\n' "$krel" > "$img/$prefix/kernel-release"
 cp -a "$mods/." "$mod/$prefix/lib/modules/$krel/"
 for spec in "retrode3-linux-modules:$mod" "retrode3-linux-image:$img"; do
   name="${spec%%:*}"; root="${spec#*:}"
-  depends=""
+  depends="Depends: kmod"
   [[ "$name" == retrode3-linux-image ]] && depends="Depends: retrode3-linux-modules (= $version)"
   cat > "$root/DEBIAN/control" <<EOF
 Package: $name
