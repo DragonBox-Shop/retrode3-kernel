@@ -1,0 +1,31 @@
+name: Retrode3 MIPS kernel Debian packaging syntax
+
+on:
+  pull_request:
+    paths:
+      - 'packaging/retrode3/**'
+      - 'arch/mips/configs/retrode3_full.config'
+      - '.github/workflows/retrode3-debian-recipe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  packaging-preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Retrode3 kernel recipe (no cross-build)
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n packaging/retrode3/build-debs.sh
+          test -s arch/mips/configs/retrode3_full.config
+          grep -Fxq CONFIG_CPU_LITTLE_ENDIAN=y arch/mips/configs/retrode3_full.config
+          grep -Fxq CONFIG_CPU_MIPS32_R2=y arch/mips/configs/retrode3_full.config
+          grep -Fxq CONFIG_MODVERSIONS=y arch/mips/configs/retrode3_full.config
+          grep -Fxq CONFIG_RETRODE3=m arch/mips/configs/retrode3_full.config
+          grep -Fq 'retrode3-linux-image' packaging/retrode3/build-debs.sh
+          grep -Fq 'retrode3-linux-modules' packaging/retrode3/build-debs.sh
+          ! grep -Eq 'dd if=.*of=/dev/|flash_erase|nandwrite' packaging/retrode3/build-debs.sh
