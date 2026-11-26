@@ -8,9 +8,13 @@ src="$(cd "$(dirname "$0")/../.." && pwd -P)"
 config="$src/arch/mips/configs/retrode3_full.config"
 test -s "$config"
 test "$(mipsel-linux-gnu-gcc -dumpmachine)" = mipsel-linux-gnu
-for option in CONFIG_CPU_LITTLE_ENDIAN=y CONFIG_CPU_MIPS32_R2=y CONFIG_MODVERSIONS=y CONFIG_RETRODE3=m; do
-  grep -Fxq "$option" "$config" || { echo "Missing $option" >&2; exit 1; }
-done
+check_required_config() {
+  local file="$1" option
+  for option in CONFIG_CPU_LITTLE_ENDIAN=y CONFIG_CPU_MIPS32_R2=y CONFIG_MODVERSIONS=y CONFIG_RETRODE3=m CONFIG_PREEMPT=y CONFIG_MODULE_UNLOAD=y; do
+    grep -Fxq "$option" "$file" || { echo "Missing $option in $file" >&2; exit 1; }
+  done
+}
+check_required_config "$config"
 mkdir -p "$out"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -18,6 +22,9 @@ mkdir -p "$tmp/build" "$tmp/modules"
 cp "$config" "$tmp/build/.config"
 kmake() { make -C "$src" O="$tmp/build" ARCH=mips CROSS_COMPILE=mipsel-linux-gnu- LOCALVERSION=+ "$@"; }
 kmake olddefconfig
+check_required_config "$tmp/build/.config"
+echo "=== Effective Kconfig differences ==="
+python3 "$src/scripts/diffconfig" "$config" "$tmp/build/.config"
 krel="$(kmake -s --no-print-directory kernelrelease | tail -n 1)"
 [[ "$krel" =~ ^[A-Za-z0-9.+_-]+$ ]] || exit 1
 kmake -j2 uImage modules dtbs
@@ -35,6 +42,7 @@ mkdir -p "$img/DEBIAN" "$mod/DEBIAN"
 mkdir -p "$img/$prefix/boot/ingenic" "$mod/$prefix/lib/modules/$krel"
 cp -L "$tmp/build/arch/mips/boot/uImage" "$img/$prefix/boot/uImage"
 cp "$tmp/build/arch/mips/boot/dts/ingenic/lx16-retrode-2.9.5.dtb" "$img/$prefix/boot/ingenic/"
+cp "$tmp/build/.config" "$img/$prefix/boot/config-$krel"
 printf '%s\n' "$krel" > "$img/$prefix/kernel-release"
 cp -a "$mods/." "$mod/$prefix/lib/modules/$krel/"
 for spec in "retrode3-linux-modules:$mod" "retrode3-linux-image:$img"; do
