@@ -18,6 +18,7 @@
 #include "esp_api.h"
 #include "esp_bt_api.h"
 #include <linux/kthread.h>
+#include <linux/err.h>
 #include "esp_stats.h"
 #include "esp_utils.h"
 #include "esp_kernel_port.h"
@@ -258,8 +259,10 @@ static void esp_remove(struct sdio_func *func)
 		atomic_set(&tx_pending, 0);
 	}
 
-	if (tx_thread)
+	if (tx_thread) {
 		kthread_stop(tx_thread);
+		tx_thread = NULL;
+	}
 
 	if (context) {
 		generate_slave_intr(context, BIT(ESP_CLOSE_DATA_PATH));
@@ -600,10 +603,19 @@ static int tx_process(void *data)
 	while (!kthread_should_stop()) {
 
 		if (atomic_read(&context->adapter->state) < ESP_CONTEXT_READY) {
-			esp_err("not ready %d", ++count);
-			if (count > 30)
-				return -EIO;
-			msleep(10 * count * count);
+			/* Keep the task alive until esp_remove() joins it.
+			 * A self-exiting task leaves tx_thread stale.
+			 * Bound the retry delay and avoid repeated log spam.
+			 */
+			if (count < 30) {
+				count++;
+				if (count == 1 || count == 30)
+					esp_info("Waiting for ESP readiness (%d)\n", count);
+			}
+			set_current_state(TASK_INTERRUPTIBLE);
+			if (!kthread_should_stop())
+				schedule_timeout(msecs_to_jiffies(1000));
+			__set_current_state(TASK_RUNNING);
 			continue;
 		}
 
@@ -703,7 +715,6 @@ static int tx_process(void *data)
 		tx_skb = NULL;
 	}
 
-	do_exit(0);
 	return 0;
 }
 
@@ -795,8 +806,14 @@ static int esp_probe(struct sdio_func *func,
 
 	tx_thread = kthread_run(tx_process, context->adapter, "esp_TX");
 
-	if (!tx_thread)
-		esp_err("Failed to create esp_sdio TX thread\n");
+	if (IS_ERR(tx_thread)) {
+		ret = PTR_ERR(tx_thread);
+		tx_thread = NULL;
+		esp_err("Failed to create esp_sdio TX thread: %d\n", ret);
+		deinit_sdio_func(func);
+		context->func = NULL;
+		return ret;
+	}
 
 	context->adapter->dev = &func->dev;
 	atomic_set(&context->adapter->state, ESP_CONTEXT_RX_READY);
