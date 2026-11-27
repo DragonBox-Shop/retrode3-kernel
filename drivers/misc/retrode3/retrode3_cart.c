@@ -133,16 +133,30 @@ static uint16_t romsel;
 #define MODE_READ (end_drive_word(slot->bus))			// D0..D15 = input
 #define MODE_WRITE						// done automatically by set_half
 
+/* CPU A15 is represented by /ROMSEL; PPU /A13 is on GPIO address 16.
+ * Keep this translation shared by the legacy and bulk address paths.
+ */
+static inline u32 retrode3_nes_gpio_address(u32 addr)
+{
+	addr = (addr & 0x7fff) | romsel;
+	if (!(addr & BIT(13)))
+		addr |= BIT(16);
+	return addr;
+}
+
 static inline int _set_address(int mode, struct retrode3_slot *slot, uint32_t addr)
 {
-	if (IS_NES()) {
-		addr = addr & 0x7fff;
-		addr |= romsel;
-		if (!(addr & BIT(13)))
-			addr |= BIT(16);
-	}
+	if (IS_NES())
+		addr = retrode3_nes_gpio_address(addr);
 // if ((addr &0xff) == 0) printk("%s: %08x\n", __func__, addr);
 	return set_address(slot->bus, addr);
+}
+
+/* Read-only native NES path, after exact GPIO topology qualification. */
+static inline int retrode3_nes_bulk_address(struct retrode3_slot *slot, u32 addr)
+{
+	return retrode3_set_rom_address(slot->bus,
+				       retrode3_nes_gpio_address(addr), true);
 }
 
 #define set_address(addr) if ((err = _set_address(mode, slot, (addr))) < 0) goto failed
@@ -205,6 +219,19 @@ static ssize_t retrode3_read(struct file *file, char __user *buf,
 		READ_ONCE(r3_rom_addr_bulk_gpio);
 	bool hold_oe = native_rom && is_snes &&
 		READ_ONCE(r3_rom_snes_oe_hold);
+	/* Only plain native NES ROM reads, never CHR_M2, RAM or register modes.
+	 * The existing bulk-address switch also provides the full legacy
+	 * NES fallback on this topology for hardware comparison.
+	 */
+	bool fast_nes = of_device_is_compatible(slot->dev.of_node,
+			"openpandora,retrode3-slot-nes") &&
+		slot->bus_width == 8 && !slot->fram_mode &&
+		slot->bus->rom_addr_bulk_available &&
+		READ_ONCE(r3_rom_addr_bulk_gpio) &&
+		((mode == NES_PRG && addr >= 0x8000u && addr < 0x10000u &&
+		  count <= 0x10000u - addr) ||
+		 (mode == NES_CHR && addr < 0x2000u &&
+		  count <= 0x2000u - addr));
 	bool oe_held = false;
 
 	ssize_t read;
@@ -324,6 +351,25 @@ static ssize_t retrode3_read(struct file *file, char __user *buf,
 		if (err)
 			goto failed;
 		end_drive_word(slot->bus);
+	}
+
+	/* The slot lock spans this read. No mapper writes or direction
+	 * changes occur inside the fast NES byte loop. Release all data
+	 * lines once, checking GPIO errors before starting any read cycle.
+	 */
+	if (fast_nes && count) {
+		unsigned int d;
+
+		for (d = 0; d < slot->bus->datas->ndescs; d++) {
+			err = gpiod_direction_input(slot->bus->datas->desc[d]);
+			if (err)
+				goto failed;
+		}
+		if (mode == NES_PRG) {
+			err = PRG_READ;
+			if (err)
+				goto failed;
+		}
 	}
 
 	while (count > 0) {
@@ -467,6 +513,35 @@ static unsigned char read_prg_byte(unsigned int address) {
 }
 */
 
+						if (fast_nes) {
+							/* Preserve ROMSEL sequencing and the current
+							 * M2-high PRG policy. Only the first byte
+							 * needs to set M2; the bus stays in read mode.
+							 */
+							romsel = BIT(15);
+							err = retrode3_nes_bulk_address(slot,
+									slot->bus->current_addr);
+							if (err)
+								goto failed;
+							err = retrode3_nes_bulk_address(slot, addr);
+							if (err)
+								goto failed;
+							if (!read && !fill) {
+								err = PHI2_HI;
+								if (err)
+									goto failed;
+							}
+							romsel = 0; /* CPU $8000-$FFFF */
+							err = retrode3_nes_bulk_address(slot, addr);
+							if (err)
+								goto failed;
+							udelay(1);
+							/* Keep the existing OE pulse and settle
+							 * in read_half() for this experiment.
+							 */
+							byte = err = PINK_PRG;
+							break;
+						}
 						/* Experimental: mirror OSCR read_prg_byte(). Keep M2
 						 * high across PRG reads; do not generate a long low
 						 * pulse while configuring the GPIO data direction.
@@ -497,6 +572,27 @@ static unsigned char read_chr_byte(unsigned int address) {
   return result;
 }
 */
+						if (fast_nes) {
+							/* Preserve the legacy CHR M2 and OE
+							 * transitions; only address, direction
+							 * setup and settling implementation change.
+							 */
+							PHI2_LOW;
+							PHI2_HI;
+							romsel = BIT(15);
+							err = retrode3_nes_bulk_address(slot,
+									slot->bus->current_addr);
+							if (err)
+								goto failed;
+							err = retrode3_nes_bulk_address(slot, addr);
+							if (err)
+								goto failed;
+							CHR_READ_LOW;
+							udelay(1);
+							byte = err = PINK_CHR;
+							CHR_READ_HI;
+							break;
+						}
 						PHI2_LOW;		// CPU_M2 = L
 						MODE_READ;
 						PHI2_HI;
