@@ -467,10 +467,15 @@ static unsigned char read_prg_byte(unsigned int address) {
 }
 */
 
-						PHI2_LOW;		// CPU_M2 = L
+						/* Experimental: mirror OSCR read_prg_byte(). Keep M2
+						 * high across PRG reads; do not generate a long low
+						 * pulse while configuring the GPIO data direction.
+						 * Deassert ROMSEL before changing address, then select
+						 * the ROM after M2 is high. No write-path changes.
+						 */
 						MODE_READ;
 						PRG_READ;
-						/* ROMSEL_HI; */ set_romsel(addr);
+						ROMSEL_HI;
 						set_address(addr);
 						PHI2_HI;
 						set_romsel(addr);
