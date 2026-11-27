@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# MIPS32EL kernel .deb candidates. Installs nothing; never touches /boot.
+# MIPS32EL kernel Debian packages. The build never installs or touches host /boot.
 set -euo pipefail
 [[ "$#" == 2 && "$1" == /* ]] || { echo "Usage: $0 /abs/out version" >&2; exit 2; }
 out="$1"; version="$2"
@@ -20,7 +20,16 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/build" "$tmp/modules"
 cp "$config" "$tmp/build/.config"
-kmake() { make -C "$src" O="$tmp/build" ARCH=mips CROSS_COMPILE=mipsel-linux-gnu- LOCALVERSION=+ "$@"; }
+# Give each installable kernel/module pair its own kernel release. This
+# prevents the running kernel from loading modules from a different build.
+# Isolated test bundles keep their historical release and staging layout.
+layout=live-v1
+localversion="+r3.$(printf '%s' "$version" | sha256sum | cut -c1-12)"
+if [[ "$version" == 0~retrode3test+* ]]; then
+  layout=staged-test
+  localversion=+
+fi
+kmake() { make -C "$src" O="$tmp/build" ARCH=mips CROSS_COMPILE=mipsel-linux-gnu- LOCALVERSION="$localversion" "$@"; }
 kmake olddefconfig
 check_required_config "$tmp/build/.config"
 echo "=== Effective Kconfig differences ==="
@@ -39,16 +48,29 @@ expected="$krel preempt mod_unload modversions MIPS32_R2 32BIT"
 prefix="usr/lib/retrode3/kernel-candidates/$version"
 img="$tmp/image"; mod="$tmp/module"
 mkdir -p "$img/DEBIAN" "$mod/DEBIAN"
-mkdir -p "$img/$prefix/boot/ingenic" "$mod/$prefix/lib/modules/$krel"
+module_prefix="lib/modules/$krel"
+[[ "$layout" != staged-test ]] || module_prefix="$prefix/$module_prefix"
+mkdir -p "$img/$prefix/boot/ingenic" "$mod/$module_prefix"
 cp -L "$tmp/build/arch/mips/boot/uImage" "$img/$prefix/boot/uImage"
 cp "$tmp/build/arch/mips/boot/dts/ingenic/lx16-retrode-2.9.5.dtb" "$img/$prefix/boot/ingenic/"
 cp "$tmp/build/.config" "$img/$prefix/boot/config-$krel"
 printf '%s\n' "$krel" > "$img/$prefix/kernel-release"
-cp -a "$mods/." "$mod/$prefix/lib/modules/$krel/"
+cp -a "$mods/." "$mod/$module_prefix/"
 for spec in "retrode3-linux-modules:$mod" "retrode3-linux-image:$img"; do
   name="${spec%%:*}"; root="${spec#*:}"
   depends="Depends: kmod"
-  [[ "$name" == retrode3-linux-image ]] && depends="Depends: retrode3-linux-modules (= $version)"
+  if [[ "$name" == retrode3-linux-image ]]; then
+    depends="Depends: retrode3-linux-modules (= $version)"
+    if [[ "$layout" == live-v1 ]]; then
+      depends="$depends, kmod, mount, util-linux, coreutils"
+      install -m 755 "$src/packaging/retrode3/kernel-postinst.sh" "$root/DEBIAN/postinst"
+      sh -n "$root/DEBIAN/postinst"
+    fi
+  fi
+  description="Staged only; no active kernel or bootloader is replaced on install."
+  if [[ "$layout" == live-v1 ]]; then
+    description="Installs matching kernel or modules; reboot after installing the pair."
+  fi
   cat > "$root/DEBIAN/control" <<EOF
 Package: $name
 Version: $version
@@ -57,11 +79,12 @@ Section: kernel
 Priority: optional
 Maintainer: OpenPandora GmbH <info@openpandora.org>
 $depends
-Description: Retrode3 MIPS32EL $name candidate
- Staged only; no active kernel or bootloader is replaced on install.
+X-Retrode3-Kernel-Layout: $layout
+Description: Retrode3 MIPS32EL $name
+ $description
 EOF
   deb="$out/${name}_${version}_mipsel.deb"
   [[ ! -e "$deb" ]] || exit 1
   dpkg-deb --root-owner-group --build "$root" "$deb"
 done
-echo "Kernel .deb candidates: $krel, $version"
+echo "Kernel .debs ($layout): $krel, $version"
