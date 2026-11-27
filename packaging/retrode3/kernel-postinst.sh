@@ -30,10 +30,10 @@ fi
   die "expected Retrode3 SD partitions not present"
 [ -d /boot ] && [ ! -L /boot ] || die "unsafe /boot mountpoint"
 root_id=$(findmnt -rn -M / -o MAJ:MIN)
-sd_id=$(lsblk -dn -o MAJ:MIN /dev/mmcblk0p2)
+sd_id=$(lsblk -dnr -o MAJ:MIN /dev/mmcblk0p2)
 [ -n "$root_id" ] && [ "$root_id" = "$sd_id" ] ||
-  die "root filesystem is not the expected Retrode3 SD partition"
-boot_id=$(lsblk -dn -o MAJ:MIN /dev/mmcblk0p1)
+  die "root filesystem is not the expected Retrode3 SD partition (actual <$root_id>, expected <$sd_id>)"
+boot_id=$(lsblk -dnr -o MAJ:MIN /dev/mmcblk0p1)
 [ -n "$boot_id" ] || die "cannot identify boot partition"
 mounted_here=0
 tmp_image=
@@ -57,7 +57,7 @@ if ! findmnt -rn -M /boot >/dev/null; then
 fi
 [ "$(findmnt -rn -M /boot -o MAJ:MIN)" = "$boot_id" ] &&
   [ "$(findmnt -rn -M /boot -o FSTYPE)" = vfat ] ||
-  die "/boot is not the expected FAT boot partition"
+  die "/boot is not the expected FAT boot partition (expected device <$boot_id>)"
 case ",$(findmnt -rn -M /boot -o OPTIONS)," in *,rw,*) ;; *) die "/boot is read-only";; esac
 mkdir -p /boot/ingenic
 # Prepare and verify all files before replacing any active boot file.
