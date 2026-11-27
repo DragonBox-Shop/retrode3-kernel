@@ -1,7 +1,15 @@
 name: Retrode3 MIPS kernel Debian packaging syntax
 
 on:
+  push:
+    branches: [master]
+    tags: ['apt-*']
+    paths:
+      - 'packaging/retrode3/**'
+      - 'arch/mips/configs/retrode3_full.config'
+      - '.github/workflows/retrode3-debian-recipe.yml'
   pull_request:
+    branches: [master]
     paths:
       - 'packaging/retrode3/**'
       - 'arch/mips/configs/retrode3_full.config'
