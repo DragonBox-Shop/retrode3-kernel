@@ -16,6 +16,7 @@
 #include "retrode3_bus.h"
 #include <linux/delay.h>
 #include <linux/errno.h>
+#include <linux/irqflags.h>
 
 // #define RETRODE3_MAJOR FLOPPY_MAJOR
 #define RETRODE3_MINORS	16
@@ -807,6 +808,130 @@ restore:
 	return 1;
 }
 
+/*
+ * Native X1600 NES mapper write timing. ROMSEL (PA31) and M2 (PC26)
+ * are on different GPIO banks: simultaneous edges are impossible here.
+ * Qualify the exact descriptor layout and use consecutive MMIO SET/CLEAR
+ * accesses with IRQs disabled only for the short active write pulse.
+ * No scheduler sleep between M2 falling and ROMSEL rising.
+ *
+ * Only single-byte NES_PRG writes at the register addresses needed by
+ * MMC3/SMD133 use this path. No new writable address or write mode is
+ * introduced. Keep other addresses, SRAM modes and other hardware legacy.
+ */
+static bool retrode3_nes_tight_write_allowed(struct retrode3_slot *slot,
+					     u32 mode, u32 addr, size_t count)
+{
+	struct retrode3_bus *bus = slot->bus;
+	struct gpio_chip *gc, *ga;
+
+	if (mode != NES_PRG || count != 1 || slot->bus_width != 8 ||
+	    !of_device_is_compatible(slot->dev.of_node,
+				     "openpandora,retrode3-slot-nes") ||
+	    !bus->rom_addr_bulk_available || !bus->rom_read_bank_map ||
+	    IS_ERR_OR_NULL(bus->phi2) || gpiod_cansleep(bus->phi2) ||
+	    IS_ENABLED(CONFIG_PREEMPT_RT))
+		return false;
+	if (addr != 0x8000u && addr != 0x8001u && addr != 0xa001u &&
+	    !(addr >= 0x5000u && addr <= 0x5003u) &&
+	    !(addr >= 0x6000u && addr <= 0x6003u))
+		return false;
+
+	/* The bulk-address probe already verifies PA31 and the X1600 map. */
+	ga = bus->addrs->desc[15]->gdev->chip;
+	gc = bus->phi2->gdev->chip;
+	return gc && ga && gc->parent && gc->parent == ga->parent &&
+	       gc->label && !strcmp(gc->label, "GPIOC") &&
+	       gc->ngpio == 32 && gpiod_hwgpio(bus->phi2) == 26 &&
+	       gpiod_is_active_low(bus->phi2);
+}
+
+static int retrode3_nes_tight_write(struct retrode3_slot *slot,
+				    u32 addr, u8 byte)
+{
+	struct retrode3_bus *bus = slot->bus;
+	struct regmap *map = bus->rom_read_bank_map;
+	const unsigned int pc = 2 * R3_ROM_GPIO_BANK_STRIDE;
+	unsigned long flags;
+	bool select_rom = addr & BIT(15);
+	int err, ret;
+	unsigned int d;
+
+	/* Physical M2 low, ROMSEL high, then address/data setup.
+	 * The logical GPIO API accounts for the active-low M2 and R/W.
+	 */
+	err = gpiod_set_value(bus->phi2, 1);
+	if (err)
+		goto restore;
+	romsel = BIT(15);
+	err = _set_address(NES_PRG, slot, addr);
+	if (err)
+		goto restore;
+	err = gpiod_set_value(bus->we->desc[0], 1);
+	if (err)
+		goto restore;
+	for (d = 0; d < 8; d++) {
+		err = gpiod_direction_output(bus->datas->desc[d],
+					     (byte >> d) & 1);
+		if (err)
+			goto restore;
+	}
+	udelay(1);
+
+	/* Match the physical NES order: M2 rises then /ROMSEL asserts;
+	 * M2 falls then /ROMSEL releases. Below $8000 ROMSEL stays high.
+	 * MMIO regmap is non-sleeping on the qualified X1600 controller.
+	 * Address and data have settled before this IRQ-off section.
+	 */
+	local_irq_save(flags);
+	err = regmap_write(map, pc + R3_ROM_PAT0_SET, BIT(26));
+	if (!err && select_rom)
+		err = regmap_write(map, R3_ROM_PAT0_CLEAR, BIT(31));
+	if (!err)
+		udelay(1);
+	ret = regmap_write(map, pc + R3_ROM_PAT0_CLEAR, BIT(26));
+	if (!err)
+		err = ret;
+	if (select_rom) {
+		ret = regmap_write(map, R3_ROM_PAT0_SET, BIT(31));
+		if (!err)
+			err = ret;
+	}
+	local_irq_restore(flags);
+	/* ROMSEL is back at its cached high level. An incomplete MMIO
+	 * transaction invalidates the address cache before any retry.
+	 */
+	if (err)
+		bus->rom_addr_cache_dirty = true;
+	udelay(1);
+
+restore:
+	/* Restore the same idle CPU read cycle as the legacy primitive.
+	 * On errors, keep M2 low, release the data bus and report failure.
+	 */
+	ret = gpiod_set_value(bus->phi2, 1);
+	if (!err)
+		err = ret;
+	romsel = BIT(15);
+	ret = _set_address(NES_PRG, slot, addr);
+	if (!err)
+		err = ret;
+	ret = gpiod_set_value(bus->we->desc[0], 0);
+	if (!err)
+		err = ret;
+	for (d = 0; d < bus->datas->ndescs; d++) {
+		ret = gpiod_direction_input(bus->datas->desc[d]);
+		if (!err)
+			err = ret;
+	}
+	if (err)
+		return err;
+	err = _set_address(NES_PRG, slot, 0);
+	if (err)
+		return err;
+	return gpiod_set_value(bus->phi2, 0);
+}
+
 static ssize_t retrode3_write(struct file *file, const char __user *buf,
 			 size_t count, loff_t *ppos)
 {
@@ -817,6 +942,7 @@ static ssize_t retrode3_write(struct file *file, const char __user *buf,
 	ssize_t written, sz;
 	unsigned long copied;
 	int err;
+	bool tight_nes = retrode3_nes_tight_write_allowed(slot, mode, addr, count);
 
 // dev_info(&slot->dev, "%s: ppos=%08llx (fram=%d mode=%d addr=%x) count=%ld\n", __func__, *ppos, slot->fram_mode, mode, addr, count);
 
@@ -936,7 +1062,17 @@ if ((addr &0xff) == 0) dev_info(&slot->dev, "%s: write mode=%02x %08x %08x\n", _
 				;;
 			case NES_PRG:
 			case NES_MMC5_SRAM:
+				if (tight_nes && copied) {
+					err = -EFAULT;
+					goto failed;
+				}
 				dev_info(&slot->dev, "%s: write NES CPU/PRG/SRAM %08x %02x\n", __func__, addr, byte);
+				if (tight_nes) {
+					err = retrode3_nes_tight_write(slot, addr, byte);
+					if (err)
+						goto failed;
+					break;
+				}
 				// err = write_prg_byte(addr, byte);
 
 /*
