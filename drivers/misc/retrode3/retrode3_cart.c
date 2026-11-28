@@ -548,7 +548,7 @@ static ssize_t retrode3_read(struct file *file, char __user *buf,
 	    (mode == NES_CHR_M2 && count <= 512 &&
 	     retrode3_nes_pulse_allowed(slot)))
 		return retrode3_nes_pulse_read(slot, buf, count, ppos, mode, addr);
-	if (mode == NES_ADDR_STROBE)
+	if (mode == NES_ADDR_STROBE || mode == NES_REG)
 		return -EOPNOTSUPP;
 
 	/*
@@ -1120,7 +1120,8 @@ static bool retrode3_nes_tight_write_allowed(struct retrode3_slot *slot,
 	struct retrode3_bus *bus = slot->bus;
 	struct gpio_chip *gc, *ga;
 
-	if (mode != NES_PRG || count != 1 || slot->bus_width != 8 ||
+	if ((mode != NES_PRG && mode != NES_REG) || count != 1 ||
+	    slot->bus_width != 8 ||
 	    !of_device_is_compatible(slot->dev.of_node,
 				     "openpandora,retrode3-slot-nes") ||
 	    !bus->rom_addr_bulk_available || !bus->rom_read_bank_map ||
@@ -1132,7 +1133,9 @@ static bool retrode3_nes_tight_write_allowed(struct retrode3_slot *slot,
 	 * registers; userspace still owns board-specific write policies.
 	 * Actual pulse widths on MMC5 hardware remain to be measured.
 	 */
-	if (addr != 0x8000u && addr != 0x8001u && addr != 0xa001u &&
+	if (mode == NES_REG && addr != 0xe000u && addr != 0xf800u)
+		return false;
+	if (mode == NES_PRG && addr != 0x8000u && addr != 0x8001u && addr != 0xa001u &&
 	    !(addr >= 0x5000u && addr <= 0x5003u) &&
 	    !(addr >= 0x6000u && addr <= 0x6003u) &&
 	    addr != 0x5100u && addr != 0x5101u &&
@@ -1266,7 +1269,7 @@ static bool retrode3_nes_short_m2_allowed(struct retrode3_slot *slot)
 }
 
 static int retrode3_nes_short_m2_write(struct retrode3_slot *slot,
-				       u32 addr, u8 byte)
+				       u32 addr, u8 byte, bool reg_strobe)
 {
 	struct retrode3_bus *bus = slot->bus;
 	struct regmap *map = bus->rom_read_bank_map;
@@ -1321,7 +1324,10 @@ static int retrode3_nes_short_m2_write(struct retrode3_slot *slot,
 	}
 	if (!err && select_rom)
 		err = regmap_write(map, R3_ROM_PAT0_CLEAR, BIT(31));
-	if (!err)
+	/* Sanni write_reg_byte uses consecutive port writes, not the
+	 * ordinary 1 us high hold. Separate X1600 GPIO banks cannot
+	 * guarantee AVR's simultaneous edges or 33 ns skew. */
+	if (!err && !reg_strobe)
 		udelay(1);
 
 	/* End the write, deassert ROMSEL, return R/W to read and move
@@ -1335,6 +1341,8 @@ static int retrode3_nes_short_m2_write(struct retrode3_slot *slot,
 		if (!err)
 			err = ret;
 	}
+	if (reg_strobe && !err)
+		udelay(1); /* original write_reg_byte post-strobe hold */
 	ret = regmap_write(map, pb + R3_ROM_PAT0_SET, BIT(8));
 	if (!err)
 		err = ret;
@@ -1399,6 +1407,38 @@ static ssize_t retrode3_write(struct file *file, const char __user *buf,
 	/* No cart writes are permitted in the bench experiment. */
 	if (legacy_bridge_hiz_test)
 		return -EOPNOTSUPP;
+
+	/* The legacy NES_REG stub never generated a real strobe. Limit
+	 * this write-only mode to the two reviewed ROM bank registers.
+	 * Do not silently fall back to the slow GPIO path. This is NOT
+	 * an electrically qualified save-RAM-safe mode. */
+	if (mode == NES_REG) {
+		u8 data;
+
+		if (!tight_nes || slot->fram_mode || !slot->bus->we ||
+		    slot->bus->we->ndescs != 2 ||
+		    !retrode3_nes_short_m2_allowed(slot) ||
+		    !retrode3_nes_pulse_allowed(slot))
+			return -EOPNOTSUPP;
+		if (copy_from_user(&data, buf, 1))
+			return -EFAULT;
+		if ((addr == 0xf800u && data >= 8u) ||
+		    (addr == 0xe000u && data >= 16u))
+			return -EINVAL;
+		select_slot(slot->bus, slot);
+		err = gpiod_get_value(slot->cd);
+		if (err > 0) {
+			retrode3_cart_led_activity(slot);
+			err = retrode3_nes_short_m2_write(slot, addr, data, true);
+		} else if (!err) {
+			err = -ENODEV;
+		}
+		select_slot(slot->bus, NULL);
+		if (err)
+			return err;
+		*ppos += 1;
+		return 1;
+	}
 
 	/* Dedicated pulse operations are bounded before selecting hardware. */
 	if (mode == NES_PRG_PULSE || mode == NES_ADDR_STROBE)
@@ -1514,7 +1554,7 @@ if ((addr &0xff) == 0) dev_info(&slot->dev, "%s: write mode=%02x %08x %08x\n", _
 				dev_info(&slot->dev, "%s: write NES CPU/PRG/SRAM %08x %02x\n", __func__, addr, byte);
 				if (tight_nes) {
 					if (retrode3_nes_short_m2_allowed(slot))
-						err = retrode3_nes_short_m2_write(slot, addr, byte);
+						err = retrode3_nes_short_m2_write(slot, addr, byte, false);
 					else
 						err = retrode3_nes_tight_write(slot, addr, byte);
 					if (err)
@@ -1628,56 +1668,6 @@ static void write_chr_byte(unsigned int address, uint8_t data) {
 				PHI2_HI;
 
 				//_delay_us(1);
-				break;
-			case NES_REG:
-/*
-static void write_reg_byte(unsigned int address, uint8_t data) {  // FIX FOR MMC1 RAM CORRUPTION
-  PHI2_LOW;
-  ROMSEL_HI;  // A15 HI = E000
-  MODE_WRITE;
-  PRG_WRITE;  // CPU R/W LO
-  PORTK = data;
-
-  set_address(address);  // PHI2 low, ROMSEL always HIGH
-  // DIRECT PIN TO PREVENT RAM CORRUPTION
-  // DIFFERENCE BETWEEN M2 LO AND ROMSEL HI MUST BE AROUND 33ns
-  // IF TIME IS GREATER THAN 33ns THEN WRITES TO 0xE000/0xF000 WILL CORRUPT RAM AT 0x6000/0x7000
-  PORTF = 0b01111101;  // ROMSEL LO/M2 HI
-  PORTF = 0b01111110;  // ROMSEL HI/M2 LO
-  _delay_us(1);
-  // Back to read mode
-  PRG_READ;
-  MODE_READ;
-  set_address(0);
-  // Set phi2 to high state to keep cartridge unreseted
-  PHI2_HI;
-}
-*/
-				PHI2_LOW;
-				ROMSEL_HI;  // A15 HI = E000
-				MODE_WRITE;
-				PRG_WRITE;  // CPU R/W LO
-				PORTK_PRG(byte);
-				set_address(addr);  // PHI2 low, ROMSEL always HIGH
-				// DIRECT PIN TO PREVENT RAM CORRUPTION
-				// DIFFERENCE BETWEEN M2 LO AND ROMSEL HI MUST BE AROUND 33ns
-				// IF TIME IS GREATER THAN 33ns THEN WRITES TO 0xE000/0xF000 WILL CORRUPT RAM AT 0x6000/0x7000
-#ifdef NIMP
-	// we can't implement this through gpiod() in Linux kernel
-	return -EINVAL;
-	// rather, we must ioremap the gpio controller registers
-	// also note: on x1600 ROMSEL is controlled by A15/CE-NES and M2 through GPC26 on different gpio controllers
-	// and try to do this with interrupts locked
-				PORTF = 0b01111101;  // ROMSEL LO/M2 HI
-				PORTF = 0b01111110;  // ROMSEL HI/M2 LO
-#endif
-				_delay_us(1);
-				// Back to read mode
-				PRG_READ;
-				MODE_READ;
-				set_address(0);
-				// Set phi2 to high state to keep cartridge unreseted
-				PHI2_HI;
 				break;
 			case NES_RAM:
 /*
