@@ -282,6 +282,7 @@ static ssize_t retrode3_nes_pulse_read(struct retrode3_slot *slot,
 {
 	struct retrode3_bus *bus = slot->bus;
 	bool prg = mode == NES_PRG_PULSE;
+	bool single = mode == NES_CHR_M2;
 	u8 data[512];
 	size_t n;
 	int err, value, ret;
@@ -312,16 +313,19 @@ static ssize_t retrode3_nes_pulse_read(struct retrode3_slot *slot,
 	 * Never hold IRQs off for an entire 512-byte block. */
 	for (n = 0; n < count; n++) {
 		local_irq_save(flags);
-		/* Upstream first clocks read mode, then address setup. */
+		/* Mapper 45 dumpCHR_M2: one low/high transition, then
+		 * address and PPU /RD. Other pulse modes retain their
+		 * preparatory address cycle and eight-pulse train.
+		 * Data direction is prepared before the byte loop. */
 		err = retrode3_nes_pulse_m2(bus, false);
 		if (!err)
 			err = retrode3_nes_pulse_m2(bus, true);
-		if (!err)
+		if (!err && !single)
 			err = retrode3_nes_pulse_m2(bus, false);
 		romsel = BIT(15);
 		if (!err)
 			err = retrode3_nes_bulk_address(slot, addr + n);
-		if (!err)
+		if (!err && !single)
 			err = retrode3_nes_pulse_m2(bus, true);
 		if (!err && prg) {
 			romsel = 0;
@@ -329,8 +333,10 @@ static ssize_t retrode3_nes_pulse_read(struct retrode3_slot *slot,
 		} else if (!err) {
 			err = set_bus_bit(bus->oe, 0);
 		}
-		if (!err)
+		if (!err && !single)
 			err = retrode3_nes_pulse_train(bus);
+		if (!err && single)
+			udelay(1);
 		if (!err) {
 			value = retrode3_bulk_rom_word(bus);
 			if (value < 0)
@@ -339,12 +345,16 @@ static ssize_t retrode3_nes_pulse_read(struct retrode3_slot *slot,
 				data[n] = prg ? value & 0xff : (value >> 8) & 0xff;
 		}
 		if (!prg) {
-			ret = retrode3_nes_pulse_m2(bus, false);
-			if (!err) err = ret;
+			if (!single) {
+				ret = retrode3_nes_pulse_m2(bus, false);
+				if (!err) err = ret;
+			}
 			ret = set_bus_bit(bus->oe, 1);
 			if (!err) err = ret;
-			ret = retrode3_nes_pulse_m2(bus, true);
-			if (!err) err = ret;
+			if (!single) {
+				ret = retrode3_nes_pulse_m2(bus, true);
+				if (!err) err = ret;
+			}
 		}
 		local_irq_restore(flags);
 		if (err)
@@ -534,7 +544,9 @@ static ssize_t retrode3_read(struct file *file, char __user *buf,
 	if (legacy_bridge_hiz_test &&
 	    !is_snes && !(is_md && retrode3_adapter_mode_is_read(mode)))
 		return -EOPNOTSUPP;
-	if (mode == NES_PRG_PULSE || mode == NES_CHR_PULSE)
+	if (mode == NES_PRG_PULSE || mode == NES_CHR_PULSE ||
+	    (mode == NES_CHR_M2 && count <= 512 &&
+	     retrode3_nes_pulse_allowed(slot)))
 		return retrode3_nes_pulse_read(slot, buf, count, ppos, mode, addr);
 	if (mode == NES_ADDR_STROBE)
 		return -EOPNOTSUPP;
