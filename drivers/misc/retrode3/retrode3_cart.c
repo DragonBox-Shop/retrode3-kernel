@@ -17,6 +17,7 @@
 #include <linux/delay.h>
 #include <linux/errno.h>
 #include <linux/irqflags.h>
+#include "retrode3_nes_ioctl.h"
 
 // #define RETRODE3_MAJOR FLOPPY_MAJOR
 #define RETRODE3_MINORS	16
@@ -1938,14 +1939,82 @@ static ssize_t retrode3_scoped_write(struct file *file, const char __user *buf,
 	return ret;
 }
 
+/*
+ * Explicit reset-detector stimulus for reset-based NES multicarts.
+ * This is not a power cycle, CPU reset pin, or cartridge write.
+ * Caller owns the userspace bus lock; scoped ioctl holds the profile
+ * mutex. Keep physical selection locked for the whole interval.
+ */
+static long retrode3_nes_soft_reset(struct file *file, unsigned long arg)
+{
+	struct retrode3_file_context *ctx = file->private_data;
+	struct retrode3_slot *slot = ctx->slot;
+	struct retrode3_bus *bus = slot->bus;
+	int err, ret, epoch;
+
+	if (arg)
+		return -EINVAL;
+	if (!(file->f_mode & FMODE_WRITE))
+		return -EBADF;
+	if (gbx_md_test || bus->gbx_active || legacy_bridge_hiz_test ||
+	    sms_mapper_write_test)
+		return -EBUSY;
+	if (!retrode3_nes_pulse_allowed(slot))
+		return -EOPNOTSUPP;
+
+	select_slot(bus, slot);
+	epoch = atomic_read(&slot->cd_epoch);
+	err = gpiod_get_value(slot->cd);
+	if (err <= 0) {
+		err = err < 0 ? err : -ENODEV;
+		goto deselect;
+	}
+
+	/* ROMSEL, PPU /RD and /WR inactive; CPU R/W read;
+	 * all data pins inputs. Never assert a cartridge write strobe.
+	 */
+	err = retrode3_nes_pulse_idle(slot);
+	if (err)
+		goto restore;
+	err = retrode3_nes_pulse_m2(bus, false);
+	if (err)
+		goto restore;
+
+	/* Sleep with interrupts enabled. The fixed 100 ms is an
+	 * experimental minimum hold, not a measured board threshold.
+	 */
+	msleep(100);
+
+restore:
+	/* Restore idle even on error or removal. No retry/reset loop. */
+	ret = retrode3_nes_pulse_idle(slot);
+	if (!err)
+		err = ret;
+	if (!err) {
+		/* Give the RC detector time to recover before subsequent I/O. */
+		usleep_range(1000, 2000);
+		ret = gpiod_get_value(slot->cd);
+		if (ret <= 0 || epoch != atomic_read(&slot->cd_epoch))
+			err = ret < 0 ? ret : -ENODEV;
+	}
+deselect:
+	select_slot(bus, NULL);
+	return err;
+}
+
 static long retrode3_scoped_ioctl(struct file *file, unsigned int cmd,
 				  unsigned long arg)
 {
+	struct retrode3_file_context *ctx = file->private_data;
 	long ret;
 
 	mutex_lock(&gbx_profile_lock);
-	ret = (gbx_md_test || mutex_is_locked(&((struct retrode3_file_context *)file->private_data)->slot->bus->select_lock)) ?
-		-EBUSY : retrode3_flash_ioctl(file, cmd, arg);
+	if (gbx_md_test || mutex_is_locked(&ctx->slot->bus->select_lock))
+		ret = -EBUSY;
+	else if (cmd == RETRODE3_NES_IOC_SOFT_RESET)
+		ret = retrode3_nes_soft_reset(file, arg);
+	else
+		ret = retrode3_flash_ioctl(file, cmd, arg);
 	mutex_unlock(&gbx_profile_lock);
 	return ret;
 }
