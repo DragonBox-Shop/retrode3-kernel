@@ -827,7 +827,9 @@ static unsigned char read_prg_byte(unsigned int address) {
 								if (err)
 									goto failed;
 							}
-							romsel = 0; /* CPU $8000-$FFFF */
+							/* The CPU expansion/ROM window below $8000 must not
+							 * assert /ROMSEL; mapper decoding uses M2 and A0-A14. */
+							romsel = (addr & BIT(15)) ? 0 : BIT(15);
 							err = retrode3_nes_bulk_address(slot, addr);
 							if (err)
 								goto failed;
