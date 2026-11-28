@@ -60,6 +60,10 @@ fi
   die "/boot is not the expected FAT boot partition (expected device <$boot_id>)"
 case ",$(findmnt -rn -M /boot -o OPTIONS)," in *,rw,*) ;; *) die "/boot is read-only";; esac
 mkdir -p /boot/ingenic
+# Driver-only updates keep identical boot files. Do not write FAT needlessly.
+if ! { cmp -s "$payload/boot/uImage" /boot/uImage &&
+       cmp -s "$payload/boot/ingenic/lx16-retrode-2.9.5.dtb" /boot/ingenic/lx16-retrode-2.9.5.dtb &&
+       cmp -s "$payload/boot/ingenic/lx16-retrode-2.9.5.dtb" /boot/ingenic/lx16.dtb; }; then
 # Prepare and verify all files before replacing any active boot file.
 # No bootloader sector writes, no saveenv and no persistent rollback copies.
 tmp_image=$(mktemp /boot/.retrode3-image.XXXXXX)
@@ -76,12 +80,13 @@ mv -f -- "$tmp_dtb" /boot/ingenic/lx16-retrode-2.9.5.dtb
 mv -f -- "$tmp_alias" /boot/ingenic/lx16.dtb
 mv -f -- "$tmp_image" /boot/uImage
 sync -f /boot
+else
+  echo "Kernel boot files unchanged; no FAT writes required."
+fi
 if [ "$mounted_here" = 1 ]; then
   umount /boot
   mounted_here=0
 fi
 # /run is cleared at reboot; never reboot or reload a driver during dpkg.
-if [ "$(uname -r)" != "$krel" ]; then
-  touch /run/retrode3-kernel-reboot-required
-fi
+touch /run/retrode3-kernel-reboot-required
 echo "Retrode3 kernel $krel installed; reboot to activate."
