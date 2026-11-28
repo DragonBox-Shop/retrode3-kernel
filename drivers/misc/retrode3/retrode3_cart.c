@@ -832,9 +832,17 @@ static bool retrode3_nes_tight_write_allowed(struct retrode3_slot *slot,
 	    IS_ERR_OR_NULL(bus->phi2) || gpiod_cansleep(bus->phi2) ||
 	    IS_ENABLED(CONFIG_PREEMPT_RT))
 		return false;
+	/* MMC5 ROM banking: use the same bounded M2-low write primitive
+	 * as SMD133. Do not extend this to RAM-protect, SRAM or ExRAM
+	 * registers; userspace still owns board-specific write policies.
+	 * Actual pulse widths on MMC5 hardware remain to be measured.
+	 */
 	if (addr != 0x8000u && addr != 0x8001u && addr != 0xa001u &&
 	    !(addr >= 0x5000u && addr <= 0x5003u) &&
-	    !(addr >= 0x6000u && addr <= 0x6003u))
+	    !(addr >= 0x6000u && addr <= 0x6003u) &&
+	    addr != 0x5100u && addr != 0x5101u &&
+	    addr != 0x5114u && addr != 0x5115u &&
+	    addr != 0x5127u && addr != 0x5130u)
 		return false;
 
 	/* The bulk-address probe already verifies PA31 and the X1600 map. */
