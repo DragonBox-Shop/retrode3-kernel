@@ -64,6 +64,9 @@
 #define NES_REG		14	// PPU d8..d15	PPU registers? $2000-$2007
 #define NES_RAM		15	// PPU d8..d15	internal RAM? $0000-$07ff
 #define NES_WRAM	16	// PPU d8..d15?	Cartridge RAM  $6000-$7fff
+#define NES_PRG_PULSE	17	// CPU ROM read / mapper write with M2 pulse train
+#define NES_CHR_PULSE	18	// PPU ROM read with M2 pulse train
+#define NES_ADDR_STROBE	19	// mapper 59 address-only write, M2 high
 
 /* one slot */
 

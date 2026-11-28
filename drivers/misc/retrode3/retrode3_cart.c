@@ -199,6 +199,264 @@ static struct retrode3_slot *legacy_bridge_md_slot(struct retrode3_bus *bus)
 
 #include "retrode3_gbx.c"
 
+/*
+ * Explicit Sanni M2 modes; do not silently substitute ordinary PRG/CHR
+ * cycles. X1600 MMIO topology only, no sleeping GPIO operations inside
+ * pulse trains. The upstream AVR has implicit instruction-cycle delays;
+ * 250 ns nominal half-period here is a starting point for measurement,
+ * NOT a claim of electrically identical timing.
+ */
+static bool retrode3_nes_pulse_allowed(struct retrode3_slot *slot)
+{
+	struct retrode3_bus *bus = slot->bus;
+	struct gpio_chip *gc, *ga;
+
+	if (slot->bus_width != 8 || slot->fram_mode ||
+	    !of_device_is_compatible(slot->dev.of_node,
+				     "openpandora,retrode3-slot-nes") ||
+	    !bus->rom_addr_bulk_available || !bus->rom_read_bank_map ||
+	    IS_ENABLED(CONFIG_PREEMPT_RT) ||
+	    IS_ERR_OR_NULL(bus->phi2) || gpiod_cansleep(bus->phi2) ||
+	    !gpiod_is_active_low(bus->phi2) ||
+	    IS_ERR_OR_NULL(bus->oe) || gpiod_cansleep(bus->oe) ||
+	    !bus->we || bus->we->ndescs != 2 || bus->datas->ndescs != 16 ||
+	    gpiod_cansleep(bus->we->desc[0]) ||
+	    gpiod_cansleep(bus->we->desc[1]))
+		return false;
+	ga = bus->addrs->desc[15]->gdev->chip;
+	gc = bus->phi2->gdev->chip;
+	return gc && ga && gc->parent && gc->parent == ga->parent &&
+	       gc->label && !strcmp(gc->label, "GPIOC") &&
+	       gc->ngpio == 32 && gpiod_hwgpio(bus->phi2) == 26;
+}
+
+static int retrode3_nes_pulse_m2(struct retrode3_bus *bus, bool high)
+{
+	return regmap_write(bus->rom_read_bank_map,
+		2 * R3_ROM_GPIO_BANK_STRIDE +
+		(high ? R3_ROM_PAT0_SET : R3_ROM_PAT0_CLEAR), BIT(26));
+}
+
+static int retrode3_nes_pulse_train(struct retrode3_bus *bus)
+{
+	unsigned int i;
+	int err;
+
+	for (i = 0; i < 8; i++) {
+		err = retrode3_nes_pulse_m2(bus, false);
+		if (err)
+			return err;
+		ndelay(250);
+		err = retrode3_nes_pulse_m2(bus, true);
+		if (err)
+			return err;
+		ndelay(250);
+	}
+	return 0;
+}
+
+/* Return to an inactive CPU/PPU address before releasing data. Called
+ * with the slot selected; never leave an asserted strobe on error. */
+static int retrode3_nes_pulse_idle(struct retrode3_slot *slot)
+{
+	struct retrode3_bus *bus = slot->bus;
+	int err = 0, ret;
+	unsigned int d;
+
+#define R3_PULSE_IDLE(op) do { ret = (op); if (!err && ret) err = ret; } while (0)
+	romsel = BIT(15);
+	R3_PULSE_IDLE(retrode3_nes_bulk_address(slot, 0));
+	R3_PULSE_IDLE(set_bus_bit(bus->oe, 1));
+	R3_PULSE_IDLE(gpiod_set_value(bus->we->desc[1], 0));
+	R3_PULSE_IDLE(gpiod_set_value(bus->we->desc[0], 0));
+	for (d = 0; d < bus->datas->ndescs; d++)
+		R3_PULSE_IDLE(gpiod_direction_input(bus->datas->desc[d]));
+	if (!err)
+		R3_PULSE_IDLE(retrode3_nes_pulse_m2(bus, true));
+#undef R3_PULSE_IDLE
+	return err;
+}
+
+static ssize_t retrode3_nes_pulse_read(struct retrode3_slot *slot,
+		char __user *buf, size_t count, loff_t *ppos, u32 mode, u32 addr)
+{
+	struct retrode3_bus *bus = slot->bus;
+	bool prg = mode == NES_PRG_PULSE;
+	u8 data[512];
+	size_t n;
+	int err, value, ret;
+	unsigned long flags;
+
+	if (!retrode3_nes_pulse_allowed(slot))
+		return -EOPNOTSUPP;
+	if (!count)
+		return 0;
+	if (count > sizeof(data) ||
+	    (prg ? (addr < 0x8000u || addr >= 0x10000u ||
+		    count > 0x10000u - addr) :
+		   (addr >= 0x2000u || count > 0x2000u - addr)))
+		return -EINVAL;
+	select_slot(bus, slot);
+	err = gpiod_get_value(slot->cd);
+	if (err <= 0) {
+		err = err < 0 ? err : -ENODEV;
+		goto out;
+	}
+	err = retrode3_nes_pulse_idle(slot);
+	if (err)
+		goto out;
+	retrode3_cart_led_activity(slot);
+
+	/* Complete each eight-pulse sample without IRQ/preemption gaps.
+	 * M2 stays high between byte cycles, and between user transfers.
+	 * Never hold IRQs off for an entire 512-byte block. */
+	for (n = 0; n < count; n++) {
+		local_irq_save(flags);
+		err = retrode3_nes_pulse_m2(bus, false);
+		romsel = BIT(15);
+		if (!err)
+			err = retrode3_nes_bulk_address(slot, addr + n);
+		if (!err)
+			err = retrode3_nes_pulse_m2(bus, true);
+		if (!err && prg) {
+			romsel = 0;
+			err = retrode3_nes_bulk_address(slot, addr + n);
+		} else if (!err) {
+			err = set_bus_bit(bus->oe, 0);
+		}
+		if (!err)
+			err = retrode3_nes_pulse_train(bus);
+		if (!err) {
+			value = retrode3_bulk_rom_word(bus);
+			if (value < 0)
+				err = value;
+			else
+				data[n] = prg ? value & 0xff : (value >> 8) & 0xff;
+		}
+		if (!prg) {
+			ret = retrode3_nes_pulse_m2(bus, false);
+			if (!err) err = ret;
+			ret = set_bus_bit(bus->oe, 1);
+			if (!err) err = ret;
+			ret = retrode3_nes_pulse_m2(bus, true);
+			if (!err) err = ret;
+		}
+		local_irq_restore(flags);
+		if (err)
+			break;
+	}
+out:
+	ret = retrode3_nes_pulse_idle(slot);
+	if (!err) err = ret;
+	select_slot(bus, NULL);
+	if (err)
+		return err;
+	if (copy_to_user(buf, data, count))
+		return -EFAULT;
+	*ppos += count;
+	return count;
+}
+
+static bool retrode3_nes_pulse_write_address(u32 mode, u32 addr, u8 data)
+{
+	if (mode == NES_ADDR_STROBE)
+		return (addr >= 0x8000u && addr <= 0x8007u) ||
+		       addr == 0x8020u || addr == 0x8040u || addr == 0x8060u;
+	switch (addr) {
+	case 0x8000: case 0x8800: case 0x6000: case 0x6001:
+		return true; /* mapper-specific data checked by userspace */
+	case 0x8001: return data <= 1u;
+	case 0x5000: return data == 0x80u || (data <= 6u && !(data & 1u));
+	case 0x5001: return data >= 0x80u && data <= 0xbfu;
+	case 0x5002: return data < 16u;
+	default: return false;
+	}
+}
+
+static ssize_t retrode3_nes_pulse_write(struct retrode3_slot *slot,
+		const char __user *buf, size_t count, loff_t *ppos, u32 mode, u32 addr)
+{
+	struct retrode3_bus *bus = slot->bus;
+	bool strobe = mode == NES_ADDR_STROBE;
+	unsigned long flags;
+	unsigned int d;
+	u8 byte;
+	int err, ret;
+
+	if (!retrode3_nes_pulse_allowed(slot))
+		return -EOPNOTSUPP;
+	if (count != 1)
+		return -EINVAL;
+	if (copy_from_user(&byte, buf, 1))
+		return -EFAULT;
+	if (!retrode3_nes_pulse_write_address(mode, addr, byte))
+		return -EINVAL;
+	select_slot(bus, slot);
+	err = gpiod_get_value(slot->cd);
+	if (err <= 0) {
+		err = err < 0 ? err : -ENODEV;
+		goto out;
+	}
+	err = retrode3_nes_pulse_idle(slot);
+	if (err)
+		goto out;
+	/* Keep M2 high at deselected CPU $0000 during direction setup. */
+	for (d = 0; d < 8; d++) {
+		err = gpiod_direction_output(bus->datas->desc[d], (byte >> d) & 1);
+		if (err)
+			goto out;
+	}
+	local_irq_save(flags);
+	if (!strobe)
+		err = retrode3_nes_pulse_m2(bus, false);
+	if (!err)
+		err = gpiod_set_value(bus->we->desc[0], 1);
+	romsel = BIT(15);
+	if (!err)
+		err = retrode3_nes_bulk_address(slot, addr);
+	if (!err && !strobe)
+		err = retrode3_nes_pulse_m2(bus, true);
+	if (!err && (addr & BIT(15))) {
+		romsel = 0;
+		err = retrode3_nes_bulk_address(slot, addr);
+	}
+	if (!err && strobe)
+		udelay(1);
+	if (!err && !strobe)
+		err = retrode3_nes_pulse_train(bus);
+	/* Upstream leaves ROMSEL selected during BOTH groups of eight. */
+	if (!err && !strobe)
+		err = retrode3_nes_pulse_train(bus);
+	if (!strobe) {
+		ret = retrode3_nes_pulse_m2(bus, false);
+		if (!err) err = ret;
+	}
+	romsel = BIT(15);
+	ret = retrode3_nes_bulk_address(slot, 0);
+	if (!err) err = ret;
+	ret = gpiod_set_value(bus->we->desc[0], 0);
+	if (!err) err = ret;
+	if (!err && !strobe)
+		err = retrode3_nes_pulse_m2(bus, true);
+	local_irq_restore(flags);
+out:
+	/* The address-only mode must not clock M2 on successful cleanup. */
+	if (strobe && !err) {
+		for (d = 0; d < bus->datas->ndescs; d++) {
+			ret = gpiod_direction_input(bus->datas->desc[d]);
+			if (!err) err = ret;
+		}
+	} else {
+		ret = retrode3_nes_pulse_idle(slot);
+		if (!err) err = ret;
+	}
+	select_slot(bus, NULL);
+	if (err)
+		return err;
+	*ppos += 1;
+	return 1;
+}
+
 static ssize_t retrode3_read(struct file *file, char __user *buf,
 			size_t count, loff_t *ppos)
 {
@@ -254,6 +512,10 @@ static ssize_t retrode3_read(struct file *file, char __user *buf,
 	/* This bench mode deliberately blocks normal MD/NES cartridge reads. */
 	if (legacy_bridge_hiz_test &&
 	    !is_snes && !(is_md && retrode3_adapter_mode_is_read(mode)))
+		return -EOPNOTSUPP;
+	if (mode == NES_PRG_PULSE || mode == NES_CHR_PULSE)
+		return retrode3_nes_pulse_read(slot, buf, count, ppos, mode, addr);
+	if (mode == NES_ADDR_STROBE)
 		return -EOPNOTSUPP;
 
 	/*
@@ -1105,6 +1367,11 @@ static ssize_t retrode3_write(struct file *file, const char __user *buf,
 	if (legacy_bridge_hiz_test)
 		return -EOPNOTSUPP;
 
+	/* Dedicated pulse operations are bounded before selecting hardware. */
+	if (mode == NES_PRG_PULSE || mode == NES_ADDR_STROBE)
+		return retrode3_nes_pulse_write(slot, buf, count, ppos, mode, addr);
+	if (mode == NES_CHR_PULSE)
+		return -EOPNOTSUPP;
 	/* Adapter lane modes must never perform a write cycle. */
 	if (retrode3_adapter_mode_is_read(mode))
 		return -EOPNOTSUPP;
