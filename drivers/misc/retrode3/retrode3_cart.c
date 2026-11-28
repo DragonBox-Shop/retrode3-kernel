@@ -312,7 +312,12 @@ static ssize_t retrode3_nes_pulse_read(struct retrode3_slot *slot,
 	 * Never hold IRQs off for an entire 512-byte block. */
 	for (n = 0; n < count; n++) {
 		local_irq_save(flags);
+		/* Upstream first clocks read mode, then address setup. */
 		err = retrode3_nes_pulse_m2(bus, false);
+		if (!err)
+			err = retrode3_nes_pulse_m2(bus, true);
+		if (!err)
+			err = retrode3_nes_pulse_m2(bus, false);
 		romsel = BIT(15);
 		if (!err)
 			err = retrode3_nes_bulk_address(slot, addr + n);
@@ -407,10 +412,20 @@ static ssize_t retrode3_nes_pulse_write(struct retrode3_slot *slot,
 			goto out;
 	}
 	local_irq_save(flags);
-	if (!strobe)
+	/* The AVR prepares read/write direction over two M2 cycles
+	 * before the address cycle. GPIO direction setup was moved to
+	 * deselected $0000 above, to avoid a long M2-low phase. */
+	if (!strobe) {
 		err = retrode3_nes_pulse_m2(bus, false);
+		if (!err) err = retrode3_nes_pulse_m2(bus, true);
+		if (!err) err = retrode3_nes_pulse_m2(bus, false);
+	}
 	if (!err)
 		err = gpiod_set_value(bus->we->desc[0], 1);
+	if (!err && !strobe) {
+		err = retrode3_nes_pulse_m2(bus, true);
+		if (!err) err = retrode3_nes_pulse_m2(bus, false);
+	}
 	romsel = BIT(15);
 	if (!err)
 		err = retrode3_nes_bulk_address(slot, addr);
@@ -432,9 +447,15 @@ static ssize_t retrode3_nes_pulse_write(struct retrode3_slot *slot,
 		if (!err) err = ret;
 	}
 	romsel = BIT(15);
-	ret = retrode3_nes_bulk_address(slot, 0);
+	ret = retrode3_nes_bulk_address(slot, addr);
 	if (!err) err = ret;
 	ret = gpiod_set_value(bus->we->desc[0], 0);
+	if (!err) err = ret;
+	if (!err && !strobe) {
+		err = retrode3_nes_pulse_m2(bus, true);
+		if (!err) err = retrode3_nes_pulse_m2(bus, false);
+	}
+	ret = retrode3_nes_bulk_address(slot, 0);
 	if (!err) err = ret;
 	if (!err && !strobe)
 		err = retrode3_nes_pulse_m2(bus, true);
